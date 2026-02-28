@@ -1,0 +1,6 @@
+pandas
+openpyxl
+colorama
+win10toast
+watchdog
+plyer
