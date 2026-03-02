@@ -16,6 +16,7 @@ import traceback
 import tkinter as tk
 from tkinter import ttk
 import winsound
+import xlwings as xw
 
 colorama.init(autoreset=True)
 
@@ -72,6 +73,8 @@ def print_status(message, status_col=""):
     color = Style.RESET_ALL
     if "EXPIRED" in status_col:
         color = Fore.RED
+    elif "1-WEEK ADVANCE" in status_col:
+        color = Fore.LIGHTRED_EX
     elif "DAYS BEFORE EXPIRY" in status_col:
         color = Fore.YELLOW
     elif "2-WEEK NOTICE" in status_col:
@@ -103,7 +106,9 @@ def get_expiration_status(exp_date, status_override):
 
         if delta_days <= 0:
             return 'EXPIRED (RED)'
-        elif 1 <= delta_days <= 14:
+        elif 1 <= delta_days <= 7:
+            return '1-WEEK ADVANCE (RED-ORANGE)'
+        elif 8 <= delta_days <= 14:
             return 'DAYS BEFORE EXPIRY (ORANGE)'
         elif 15 <= delta_days <= 29:
             return 'DAYS BEFORE 2 WEEK NOTICE (YELLOW)'
@@ -195,6 +200,7 @@ class AlertWindow(tk.Tk):
             stripe_2 = '#35363A'
             importance_order = [
                 ('EXPIRED', '#F28B82'),
+                ('1-WEEK ADVANCE', '#FF8A65'),
                 ('DAYS BEFORE EXPIRY', '#FDC69C'),
                 ('DAYS BEFORE 2 WEEK NOTICE', '#FCE8E6'),
                 ('PLEASE INPUT LAST REG', '#9AA0A6')
@@ -209,6 +215,7 @@ class AlertWindow(tk.Tk):
             stripe_2 = '#F8F9FA'
             importance_order = [
                 ('EXPIRED', '#D93025'),
+                ('1-WEEK ADVANCE', '#F4511E'),
                 ('DAYS BEFORE EXPIRY', '#E37400'),
                 ('DAYS BEFORE 2 WEEK NOTICE', '#F29900'),
                 ('PLEASE INPUT LAST REG', '#80868B')
@@ -226,16 +233,19 @@ class AlertWindow(tk.Tk):
         has_alerts = False
         
         # Setup Treeview Table
-        columns = ("plate", "date", "status")
+        columns = ("plate", "date", "status", "sheet")
         tree = ttk.Treeview(summary_frame, columns=columns, show="headings", style="Custom.Treeview", height=10)
         
         tree.heading("plate", text="Plate Number", anchor=tk.W)
         tree.heading("date", text="Expiration / Status", anchor=tk.W)
         tree.heading("status", text="Condition", anchor=tk.W)
+        tree.heading("sheet", text="Sheet", anchor=tk.W) # Hidden column for data storage
         
         tree.column("plate", width=150, minwidth=120, stretch=tk.NO)
         tree.column("date", width=150, minwidth=120, stretch=tk.NO)
         tree.column("status", width=220, minwidth=180, stretch=tk.YES)
+        # Hide the sheet column from view but keep it in the data structure
+        tree.column("sheet", width=0, minwidth=0, stretch=tk.NO)
         
         scrollbar = ttk.Scrollbar(summary_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
@@ -269,19 +279,80 @@ class AlertWindow(tk.Tk):
                 
                 for p_str in matching_plates:
                     p_str = str(p_str)
-                    if '||' in p_str:
-                        plate, date_val = p_str.split('||', 1)
+                    parts = p_str.split('||')
+                    if len(parts) == 3:
+                        plate, date_val, sheet_name = parts
+                    elif len(parts) == 2:
+                        plate, date_val = parts
+                        sheet_name = "Unknown"
                     else:
                         plate = p_str
                         date_val = "N/A"
+                        sheet_name = "Unknown"
                         
                     # Insert row
                     stripe_tag = 'evenrow' if row_count % 2 == 0 else 'oddrow'
-                    tree.insert("", tk.END, values=(plate, date_val, status_key), tags=(status_key, stripe_tag))
+                    tree.insert("", tk.END, values=(plate, date_val, status_key, sheet_name), tags=(status_key, stripe_tag))
                     row_count += 1
                     has_alerts = True
                     
         if has_alerts:
+            def on_row_click(event):
+                # Only open if they clicked on an actual item
+                region = tree.identify("region", event.x, event.y)
+                if region == "cell" or region == "tree":
+                    item_id = tree.identify_row(event.y)
+                    if item_id:
+                        values = tree.item(item_id, 'values')
+                        if len(values) >= 4:
+                            target_sheet = values[3]
+                            
+                            def open_excel_threaded():
+                                try:
+                                    abs_path = os.path.abspath(EXCEL_FILE)
+                                    target_wb_name = os.path.basename(EXCEL_FILE)
+                                    
+                                    wb_found = None
+                                    app_found = None
+                                    
+                                    # Search through all active Excel instances
+                                    for app in xw.apps:
+                                        for book in app.books:
+                                            if book.name == target_wb_name:
+                                                wb_found = book
+                                                app_found = app
+                                                break
+                                        if wb_found:
+                                            break
+                                            
+                                    if wb_found:
+                                        app = app_found
+                                        wb = wb_found
+                                    else:
+                                        # If not open anywhere, start it
+                                        app = xw.App(visible=True)
+                                        wb = app.books.open(abs_path)
+                                        
+                                    app.visible = True
+                                    try:
+                                        app.activate(steal_focus=True)
+                                    except:
+                                        pass
+                                    
+                                    if target_sheet in [s.name for s in wb.sheets]:
+                                        wb.sheets[target_sheet].activate()
+                                        
+                                except Exception as e:
+                                    print(f"Failed to open/activate Excel via xlwings: {e}")
+                                    try:
+                                        os.startfile(EXCEL_FILE) # Fallback to standard open
+                                    except:
+                                        pass
+                                        
+                            threading.Thread(target=open_excel_threaded, daemon=True).start()
+                        
+            tree.bind("<ButtonRelease-1>", on_row_click)
+            
             tree.pack(side="left", fill="both", expand=True)
             scrollbar.pack(side="right", fill="y")
         else:
@@ -372,18 +443,18 @@ def send_notification(detailed_alerts, title="⚠ Vehicle Update Detected"):
         return
     gui_queue.put({'type': 'show', 'alerts': detailed_alerts, 'title': title})
 
-def format_plate_with_date(plate, exp_date):
+def format_plate_with_date(plate, exp_date, sheet_name="Unknown"):
     if pd.isna(exp_date) or str(exp_date).strip() == '':
-        return f"{plate}||N/A"
+        return f"{plate}||N/A||{sheet_name}"
     try:
         if not hasattr(exp_date, 'strftime'):
             exp_date_str = str(exp_date).replace('\\', '/')
             exp_date = pd.to_datetime(exp_date_str, dayfirst=True)
             
         dt_str = exp_date.strftime('%Y-%m-%d')
-        return f"{plate}||{dt_str}"
+        return f"{plate}||{dt_str}||{sheet_name}"
     except:
-        return f"{plate}||{exp_date}"
+        return f"{plate}||{exp_date}||{sheet_name}"
 
 def find_header_row(excel_file_obj, sheet_name):
     """
@@ -477,6 +548,8 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                 val = str(row[alert_col]).strip().upper()
                 if 'EXPIRED' in val:
                     status = 'EXPIRED (RED)'
+                elif '1 WEEK' in val or '1-WEEK' in val or '7 DAYS' in val:
+                    status = '1-WEEK ADVANCE (RED-ORANGE)'
                 elif 'DAYS BEFORE' in val and 'NOTICE' not in val and '2-WEEK' not in val and '2 WEEK' not in val:
                     status = 'DAYS BEFORE EXPIRY (ORANGE)'
                 elif '2-WEEK' in val or '2 WEEK' in val or '15 TO' in val:
@@ -497,13 +570,18 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                         status_override = 'REGISTERED'
                 status = get_expiration_status(exp_date, status_override)
                 
-            current_state[plate] = (status, exp_date)
+            current_state[plate] = (status, exp_date, sheet_name)
             
             if not first_run or manual_sheet_target is not None:
                 old_state = previous_state.get(plate, None)
                 if old_state is not None:
-                    old_status, old_exp = old_state
-                    if old_status != status or old_exp != exp_date:
+                    if len(old_state) == 3:
+                        old_status, old_exp, old_sheet = old_state
+                    else:
+                        old_status, old_exp = old_state
+                        old_sheet = "Unknown"
+                        
+                    if old_status != status or old_exp != exp_date or old_sheet != sheet_name:
                         changed_records.append({
                             'plate': plate,
                             'old_status': old_status,
@@ -511,7 +589,7 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                             'sheet': sheet_name,
                             'exp_date': exp_date
                         })
-                elif old_state is None and ('EXPIRED' in status or 'DAYS BEFORE' in status or '2-WEEK' in status):
+                elif old_state is None and ('EXPIRED' in status or 'DAYS BEFORE' in status or '2-WEEK' in status or '1-WEEK' in status):
                      changed_records.append({
                         'plate': plate,
                         'old_status': 'NEW RECORD',
@@ -538,11 +616,11 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
         print(f"{Fore.CYAN}--- Initial Scan Results ({len(dfs)} sheets checked) ---{Style.RESET_ALL}")
         initial_alerts = {}
         for plate, state_tuple in combined_current_state.items():
-            status, exp_date = state_tuple[0], state_tuple[1]
+            status, exp_date, sheet_name = state_tuple[0], state_tuple[1], state_tuple[2]
             print_status(f"[{plate}] {status}", status)
             if status not in initial_alerts:
                 initial_alerts[status] = []
-            initial_alerts[status].append(format_plate_with_date(plate, exp_date))
+            initial_alerts[status].append(format_plate_with_date(plate, exp_date, sheet_name))
         
         print(f"{Fore.CYAN}--- End Initial Scan ---{Style.RESET_ALL}")
         
@@ -560,10 +638,10 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
              manual_alerts = {}
              # Just pull from the results of what we read!
              for plate, state_tuple in combined_current_state.items():
-                 status, exp_date = state_tuple[0], state_tuple[1]
+                 status, exp_date, sheet_name = state_tuple[0], state_tuple[1], state_tuple[2]
                  if status not in manual_alerts:
                      manual_alerts[status] = []
-                 manual_alerts[status].append(format_plate_with_date(plate, exp_date))
+                 manual_alerts[status].append(format_plate_with_date(plate, exp_date, sheet_name))
              
              if manual_alerts:
                  send_notification(manual_alerts, title=title_text)
@@ -586,10 +664,10 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
              # Send comprehensive updated state so UI refreshes real-time
              full_alerts = {}
              for plate, state_tuple in combined_current_state.items():
-                 status, exp_date = state_tuple[0], state_tuple[1]
+                 status, exp_date, sheet_name = state_tuple[0], state_tuple[1], state_tuple[2]
                  if status not in full_alerts:
                      full_alerts[status] = []
-                 full_alerts[status].append(format_plate_with_date(plate, exp_date))
+                 full_alerts[status].append(format_plate_with_date(plate, exp_date, sheet_name))
                      
              if full_alerts:
                  send_notification(full_alerts, title=f"⚠ Real-time File Update: {sheet_title_str}")
@@ -624,13 +702,13 @@ def background_monitor():
 
 # Manual Scan All via Tray (Sends entire overview)
 def on_scan_all(icon, item):
-    print("Manually Scanning All...")
-    process_excel(EXCEL_FILE, is_manual_scan=True)
+    print("Manually Scanning Excel...")
+    threading.Thread(target=process_excel, args=(EXCEL_FILE,), kwargs={'is_manual_scan': True}, daemon=True).start()
     
 def make_scan_sheet_callback(sheet_name):
     def callback(icon, item):
         print(f"Manually Scanning: {sheet_name}")
-        process_excel(EXCEL_FILE, manual_sheet_target=sheet_name, is_manual_scan=True)
+        threading.Thread(target=process_excel, args=(EXCEL_FILE,), kwargs={'manual_sheet_target': sheet_name, 'is_manual_scan': True}, daemon=True).start()
     return callback
 
 def on_exit(icon, item):
@@ -646,7 +724,7 @@ def pystray_runner():
     tray_icon = pystray.Icon("VehicleMonitor", image, "Vehicle Alert System")
     
     def setup_menu():
-        items = [pystray.MenuItem('Scan All', on_scan_all), pystray.Menu.SEPARATOR]
+        items = [pystray.MenuItem('Scan Excel', on_scan_all), pystray.Menu.SEPARATOR]
         if current_sheets:
             sheet_menus = []
             for sheet in current_sheets:
