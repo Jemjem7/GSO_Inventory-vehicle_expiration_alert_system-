@@ -3,7 +3,10 @@ import sys
 import time
 import threading
 import queue
+import json
+import winreg
 import pandas as pd
+import io
 from datetime import datetime
 import colorama
 from colorama import Fore, Style
@@ -19,6 +22,33 @@ colorama.init(autoreset=True)
 # Configuration
 EXCEL_FILE = 'VehicleMonitoring.xlsx'
 CHECK_INTERVAL_SECONDS = 5
+
+def get_system_theme():
+    try:
+        registry = winreg.ConnectRegistry(None, winreg.HKEY_CURRENT_USER)
+        key = winreg.OpenKey(registry, r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        return "Light" if value else "Dark"
+    except Exception:
+        return "Light"
+
+def load_settings():
+    try:
+        if os.path.exists("settings.json"):
+            with open("settings.json", "r") as f:
+                return json.load(f)
+    except:
+        pass
+    return {"theme": "System"}
+
+def save_settings(settings):
+    try:
+        with open("settings.json", "w") as f:
+            json.dump(settings, f)
+    except:
+        pass
+
+app_settings = load_settings()
 
 # State
 previous_state = {}
@@ -65,7 +95,8 @@ def get_expiration_status(exp_date, status_override):
         if isinstance(exp_date, pd.Timestamp) or isinstance(exp_date, datetime):
             target_date = exp_date.date()
         else:
-            target_date = pd.to_datetime(exp_date, dayfirst=True).date()
+            exp_date_str = str(exp_date).replace('\\', '/')
+            target_date = pd.to_datetime(exp_date_str, dayfirst=True).date()
             
         today = datetime.now().date()
         delta_days = (target_date - today).days
@@ -75,7 +106,7 @@ def get_expiration_status(exp_date, status_override):
         elif 1 <= delta_days <= 14:
             return 'DAYS BEFORE EXPIRY (ORANGE)'
         elif 15 <= delta_days <= 29:
-            return '2-WEEK NOTICE (YELLOW)'
+            return 'DAYS BEFORE 2 WEEK NOTICE (YELLOW)'
         else:
             return 'SUFFICIENT TIME (GREEN)'
     except Exception as e:
@@ -86,18 +117,20 @@ class AlertWindow(tk.Tk):
         super().__init__()
         self.title("⚠ Vehicle Expiration Alert")
         self.attributes('-topmost', True)
-        self.configure(bg='#f0f0f0')
+        self.current_theme = app_settings.get("theme", "System")
+        self.last_alerts = {}
+        self.last_title = ""
         self.withdraw() # Hide immediately on launch
         
-        window_width = 440
-        window_height = 300
+        window_width = 580
+        window_height = 380
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
         x = screen_width - window_width - 20
         y = screen_height - window_height - 60
         self.geometry(f"{window_width}x{window_height}+{x}+{y}")
         
-        self.main_container = tk.Frame(self, bg='#f0f0f0')
+        self.main_container = tk.Frame(self)
         self.main_container.pack(fill=tk.BOTH, expand=True)
 
         # Trap protocol so the user simply HIDES the window on X, no destroying!
@@ -136,99 +169,203 @@ class AlertWindow(tk.Tk):
             pass
         self.after(200, self.check_queue)
         
+    def change_theme(self, selection):
+        self.current_theme = selection
+        app_settings["theme"] = selection
+        save_settings(app_settings)
+        if self.last_alerts:
+            self.build_ui(self.last_alerts, self.last_title)
+
     def build_ui(self, detailed_alerts, window_title):
+        self.last_alerts = detailed_alerts
+        self.last_title = window_title
+        
         for w in self.main_container.winfo_children():
             w.destroy()
             
-        header = tk.Label(self.main_container, text=window_title, font=("Segoe UI", 12, "bold"), bg='#f0f0f0', fg='#333333')
-        header.pack(pady=(15, 5))
+        actual_theme = get_system_theme() if self.current_theme == "System" else self.current_theme
         
-        summary_frame = tk.Frame(self.main_container, bg='#ffffff', bd=1, relief=tk.SUNKEN)
-        summary_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+        if actual_theme == "Dark":
+            bg_color = '#202124'
+            fg_color = '#E8EAED'
+            panel_bg = '#2D2E31'
+            text_fg = '#E8EAED'
+            sub_fg = '#9AA0A6'
+            stripe_1 = '#2D2E31'
+            stripe_2 = '#35363A'
+            importance_order = [
+                ('EXPIRED', '#F28B82'),
+                ('DAYS BEFORE EXPIRY', '#FDC69C'),
+                ('DAYS BEFORE 2 WEEK NOTICE', '#FCE8E6'),
+                ('PLEASE INPUT LAST REG', '#9AA0A6')
+            ]
+        else:
+            bg_color = '#F1F3F4'
+            fg_color = '#202124'
+            panel_bg = '#FFFFFF'
+            text_fg = '#202124'
+            sub_fg = '#5F6368'
+            stripe_1 = '#FFFFFF'
+            stripe_2 = '#F8F9FA'
+            importance_order = [
+                ('EXPIRED', '#D93025'),
+                ('DAYS BEFORE EXPIRY', '#E37400'),
+                ('DAYS BEFORE 2 WEEK NOTICE', '#F29900'),
+                ('PLEASE INPUT LAST REG', '#80868B')
+            ]
+            
+        self.configure(bg=bg_color)
+        self.main_container.configure(bg=bg_color)
+            
+        header = tk.Label(self.main_container, text=window_title, font=("Segoe UI", 14, "bold"), bg=bg_color, fg=fg_color)
+        header.pack(pady=(20, 10))
         
-        importance_order = [
-            ('EXPIRED', '#d32f2f'),
-            ('DAYS BEFORE EXPIRY', '#e65100'),
-            ('2-WEEK NOTICE', '#f57f17'),
-            ('SUFFICIENT TIME', '#2e7d32'),
-            ('PLEASE INPUT LAST REG', '#616161'),
-            ('REGISTERED', '#1565c0')
-        ]
+        summary_frame = tk.Frame(self.main_container, bg=panel_bg, bd=0)
+        summary_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
         
         has_alerts = False
-        canvas = tk.Canvas(summary_frame, bg='#ffffff', highlightthickness=0)
-        scrollbar = ttk.Scrollbar(summary_frame, orient="vertical", command=canvas.yview)
-        scrollable_frame = tk.Frame(canvas, bg='#ffffff')
         
-        scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
+        # Setup Treeview Table
+        columns = ("plate", "date", "status")
+        tree = ttk.Treeview(summary_frame, columns=columns, show="headings", style="Custom.Treeview", height=10)
         
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
+        tree.heading("plate", text="Plate Number", anchor=tk.W)
+        tree.heading("date", text="Expiration / Status", anchor=tk.W)
+        tree.heading("status", text="Condition", anchor=tk.W)
+        
+        tree.column("plate", width=150, minwidth=120, stretch=tk.NO)
+        tree.column("date", width=150, minwidth=120, stretch=tk.NO)
+        tree.column("status", width=220, minwidth=180, stretch=tk.YES)
+        
+        scrollbar = ttk.Scrollbar(summary_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scrollbar.set)
+        
+        # Setup row striping tags
+        tree.tag_configure('evenrow', background=stripe_1)
+        tree.tag_configure('oddrow', background=stripe_2)
         
         # Sort out and display
+        row_count = 0
         for status_key, color in importance_order:
+            tree.tag_configure(status_key, foreground=color)
             matching_plates = []
+            
             for full_status, plates in detailed_alerts.items():
                 if status_key in full_status:
                     if isinstance(plates, list):
                         matching_plates.extend(plates)
             
             if matching_plates:
-                # Helper for sorting plates by exact date "PLATE (YYYY-MM-DD)"
                 def extract_date(p_str):
                     try:
-                        part = str(p_str).split('(')[-1].strip(')')
-                        return datetime.strptime(part, '%Y-%m-%d')
+                        if '||' in str(p_str):
+                            part = str(p_str).split('||')[-1].strip()
+                            return datetime.strptime(part, '%Y-%m-%d')
+                        return datetime.max
                     except Exception:
                         return datetime.max
                         
                 matching_plates.sort(key=extract_date)
-
-                text = f"• {len(matching_plates)} {status_key}"
-                lbl = tk.Label(scrollable_frame, text=text, font=("Segoe UI", 10, "bold"), bg='#ffffff', fg=color, anchor="w")
-                lbl.pack(fill=tk.X, padx=10, pady=(5, 0))
                 
-                plates_text = ", ".join(str(p) for p in matching_plates)
-                plates_lbl = tk.Message(scrollable_frame, text=plates_text, font=("Segoe UI", 8), bg='#ffffff', fg='#555555', width=300, justify=tk.LEFT)
-                plates_lbl.pack(fill=tk.X, padx=25, pady=(0, 5))
-                has_alerts = True
-                
-        if not has_alerts:
-             lbl = tk.Label(scrollable_frame, text="All vehicles are up to date.", font=("Segoe UI", 10), bg='#ffffff', fg='#2e7d32')
-             lbl.pack(pady=10)
+                for p_str in matching_plates:
+                    p_str = str(p_str)
+                    if '||' in p_str:
+                        plate, date_val = p_str.split('||', 1)
+                    else:
+                        plate = p_str
+                        date_val = "N/A"
+                        
+                    # Insert row
+                    stripe_tag = 'evenrow' if row_count % 2 == 0 else 'oddrow'
+                    tree.insert("", tk.END, values=(plate, date_val, status_key), tags=(status_key, stripe_tag))
+                    row_count += 1
+                    has_alerts = True
+                    
+        if has_alerts:
+            tree.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+        else:
+             lbl = tk.Label(summary_frame, text="All vehicles are up to date.", font=("Segoe UI", 10), bg=panel_bg, fg='#66cc66' if actual_theme == 'Dark' else '#2e7d32')
+             lbl.pack(pady=20)
         
-        self.status_lbl = tk.Label(self.main_container, text="", bg='#f0f0f0', font=("Segoe UI", 8, "italic"), fg='#666666')
-        self.status_lbl.pack(pady=(0, 2))
+        self.status_lbl = tk.Label(self.main_container, text="", bg=bg_color, font=("Segoe UI", 9, "italic"), fg=sub_fg)
+        self.status_lbl.pack(pady=(5, 5))
 
-        btn_frame = tk.Frame(self.main_container, bg='#f0f0f0')
-        btn_frame.pack(fill=tk.X, padx=15, pady=(0, 10))
+        btn_frame = tk.Frame(self.main_container, bg=bg_color)
+        btn_frame.pack(fill=tk.X, padx=20, pady=(0, 15))
         
-        lbl_action = tk.Label(btn_frame, text="Run Manual Scan:", bg='#f0f0f0', font=("Segoe UI", 9))
+        # Stylization for ttk buttons
+        style = ttk.Style()
+        style.theme_use('clam')
+        if actual_theme == 'Dark':
+            style.configure('TButton', background='#3C4043', foreground='#E8EAED', bordercolor='#5F6368', font=('Segoe UI', 9))
+            style.map('TButton', background=[('active', '#5F6368')])
+            style.configure('TMenubutton', background='#3C4043', foreground='#E8EAED', bordercolor='#5F6368', font=('Segoe UI', 9))
+            style.map('TMenubutton', background=[('active', '#5F6368')])
+            style.configure("Custom.Treeview", background=panel_bg, fieldbackground=panel_bg, foreground=text_fg, borderwidth=0, font=("Segoe UI", 10), rowheight=26)
+            style.configure("Custom.Treeview.Heading", background='#202124', foreground='#E8EAED', font=("Segoe UI", 10, "bold"), borderwidth=0, padding=4)
+            style.map("Custom.Treeview.Heading", background=[('active', '#3C4043')])
+            style.map("Custom.Treeview", background=[('selected', '#5F6368')])
+            self.option_add("*Menu.background", "#2D2E31")
+            self.option_add("*Menu.foreground", "#E8EAED")
+            self.option_add("*Menu.selectColor", "#5F6368")
+        else:
+            style.configure('TButton', background='#E8EAED', foreground='#202124', bordercolor='#DADCE0', font=('Segoe UI', 9))
+            style.map('TButton', background=[('active', '#DADCE0')])
+            style.configure('TMenubutton', background='#E8EAED', foreground='#202124', bordercolor='#DADCE0', font=('Segoe UI', 9))
+            style.map('TMenubutton', background=[('active', '#DADCE0')])
+            
+            style.configure("Custom.Treeview", background=panel_bg, fieldbackground=panel_bg, foreground=text_fg, borderwidth=0, font=("Segoe UI", 10), rowheight=26)
+            style.configure("Custom.Treeview.Heading", background='#F1F3F4', foreground='#202124', font=("Segoe UI", 10, "bold"), borderwidth=0, padding=4)
+            style.map("Custom.Treeview.Heading", background=[('active', '#E8EAED')])
+            style.map("Custom.Treeview", background=[('selected', '#DADCE0')])
+            self.option_add("*Menu.background", "#FFFFFF")
+            self.option_add("*Menu.foreground", "#202124")
+            self.option_add("*Menu.selectColor", "#E8EAED")
+        
+        # Theme Dropdown
+        theme_frame = tk.Frame(btn_frame, bg=bg_color)
+        theme_frame.pack(side=tk.LEFT)
+        
+        lbl_theme = tk.Label(theme_frame, text="Theme:", bg=bg_color, fg=fg_color, font=("Segoe UI", 9))
+        lbl_theme.pack(side=tk.LEFT)
+        
+        self.theme_var = tk.StringVar(value=self.current_theme)
+        
+        theme_dropdown = ttk.OptionMenu(theme_frame, self.theme_var, self.current_theme, "Light", "Dark", "System", command=self.change_theme)
+        theme_dropdown.config(width=7)
+        theme_dropdown.pack(side=tk.LEFT, padx=5)
+        # Apply menu styling
+        theme_dropdown['menu'].configure(bg='#2d2d2d' if actual_theme == 'Dark' else '#f0f0f0', fg='#ffffff' if actual_theme == 'Dark' else '#000000')
+        
+        # Spacer
+        spacer = tk.Label(btn_frame, text=" | ", bg=bg_color, fg=sub_fg, font=("Segoe UI", 9))
+        spacer.pack(side=tk.LEFT, padx=2)
+        
+        lbl_action = tk.Label(btn_frame, text="Run Manual Scan:", bg=bg_color, fg=fg_color, font=("Segoe UI", 9))
         lbl_action.pack(side=tk.LEFT)
         
-        btn_scan_all = ttk.Button(btn_frame, text="Scan All", command=self.do_scan_all, width=10)
+        btn_scan_all = ttk.Button(btn_frame, text="Scan All", command=self.do_scan_all, width=8)
         btn_scan_all.pack(side=tk.RIGHT)
         
         self.sheet_var = tk.StringVar()
         dropdown_values = current_sheets if current_sheets else ["No Sheets Found"]
         self.sheet_var.set("Select Month...")
         
-        style = ttk.Style()
-        style.theme_use('clam')
         sheet_dropdown = ttk.OptionMenu(btn_frame, self.sheet_var, "Select Month...", *dropdown_values, command=self.do_scan_month)
-        sheet_dropdown.config(width=18)
+        sheet_dropdown.config(width=16)
         sheet_dropdown.pack(side=tk.RIGHT, padx=5)
+        # Apply menu styling
+        sheet_dropdown['menu'].configure(bg='#2d2d2d' if actual_theme == 'Dark' else '#f0f0f0', fg='#ffffff' if actual_theme == 'Dark' else '#000000')
 
     def do_scan_all(self):
         self.status_lbl.config(text="Scanning all sheets in background...")
-        threading.Thread(target=process_excel, args=(EXCEL_FILE,), daemon=True).start()
+        threading.Thread(target=process_excel, args=(EXCEL_FILE, None, True), daemon=True).start()
 
     def do_scan_month(self, selection):
         if selection and selection != "Select Month..." and selection != "No Sheets Found":
             self.status_lbl.config(text=f"Scanning {selection} in background...")
-            threading.Thread(target=process_excel, args=(EXCEL_FILE, selection), daemon=True).start()
+            threading.Thread(target=process_excel, args=(EXCEL_FILE, selection, True), daemon=True).start()
 
 def send_notification(detailed_alerts, title="⚠ Vehicle Update Detected"):
     if not detailed_alerts:
@@ -236,21 +373,25 @@ def send_notification(detailed_alerts, title="⚠ Vehicle Update Detected"):
     gui_queue.put({'type': 'show', 'alerts': detailed_alerts, 'title': title})
 
 def format_plate_with_date(plate, exp_date):
-    if pd.isna(exp_date):
-        return plate
+    if pd.isna(exp_date) or str(exp_date).strip() == '':
+        return f"{plate}||N/A"
     try:
-        dt_str = exp_date.strftime('%Y-%m-%d') if hasattr(exp_date, 'strftime') else str(exp_date).split(' ')[0]
-        return f"{plate} ({dt_str})"
+        if not hasattr(exp_date, 'strftime'):
+            exp_date_str = str(exp_date).replace('\\', '/')
+            exp_date = pd.to_datetime(exp_date_str, dayfirst=True)
+            
+        dt_str = exp_date.strftime('%Y-%m-%d')
+        return f"{plate}||{dt_str}"
     except:
-        return f"{plate} ({exp_date})"
+        return f"{plate}||{exp_date}"
 
-def find_header_row(filepath, sheet_name):
+def find_header_row(excel_file_obj, sheet_name):
     """
     Scans the first 15 rows looking for "PLATE". 
     Returns the integer index of the row to use as the header.
     """
     try:
-        df_test = pd.read_excel(filepath, engine='openpyxl', nrows=15, header=None, sheet_name=sheet_name)
+        df_test = pd.read_excel(excel_file_obj, nrows=15, header=None, sheet_name=sheet_name)
         for i, row in df_test.iterrows():
             if any(isinstance(v, str) and 'PLATE' in v.upper() for v in row.values):
                 return i
@@ -258,33 +399,37 @@ def find_header_row(filepath, sheet_name):
         pass
     return 3 # fallback default
 
-def process_excel(filepath, manual_sheet_target=None):
+def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
     global previous_state, first_run, current_sheets
     
     try:
         if not os.path.exists(filepath):
-            if manual_sheet_target is not None:
+            if is_manual_scan:
                 print(f"{Fore.RED}File not found. Cannot scan.{Style.RESET_ALL}")
             return False
 
+        # To avoid file lock/sharing violations, read file into memory first
+        with open(filepath, 'rb') as f:
+            file_buffer = io.BytesIO(f.read())
+
         # Load specific sheet or all sheets
-        if manual_sheet_target:
-            h_row = find_header_row(filepath, manual_sheet_target)
-            dfs = pd.read_excel(filepath, engine='openpyxl', header=h_row, sheet_name=manual_sheet_target)
-            if isinstance(dfs, pd.DataFrame):
-                dfs = {manual_sheet_target: dfs}
-        else:
-            xl = pd.ExcelFile(filepath, engine='openpyxl')
-            dfs = {}
-            for sh in xl.sheet_names:
-                h_row = find_header_row(filepath, sh)
-                dfs[sh] = pd.read_excel(filepath, engine='openpyxl', header=h_row, sheet_name=sh)
-            
-        if manual_sheet_target is None:
-            current_sheets = list(dfs.keys())
+        with pd.ExcelFile(file_buffer, engine='openpyxl') as xl:
+            if manual_sheet_target:
+                h_row = find_header_row(xl, manual_sheet_target)
+                dfs = pd.read_excel(xl, header=h_row, sheet_name=manual_sheet_target)
+                if isinstance(dfs, pd.DataFrame):
+                    dfs = {manual_sheet_target: dfs}
+            else:
+                dfs = {}
+                for sh in xl.sheet_names:
+                    h_row = find_header_row(xl, sh)
+                    dfs[sh] = pd.read_excel(xl, header=h_row, sheet_name=sh)
+                
+            if manual_sheet_target is None:
+                current_sheets = list(dfs.keys())
                 
     except Exception as e:
-        if manual_sheet_target is not None:
+        if is_manual_scan:
              print(f"{Fore.RED}Error loading Excel: {e}{Style.RESET_ALL}")
         return False
 
@@ -332,19 +477,16 @@ def process_excel(filepath, manual_sheet_target=None):
                 val = str(row[alert_col]).strip().upper()
                 if 'EXPIRED' in val:
                     status = 'EXPIRED (RED)'
-                elif 'DAYS BEFORE' in val and 'NOTICE' not in val and '2-WEEK' not in val:
+                elif 'DAYS BEFORE' in val and 'NOTICE' not in val and '2-WEEK' not in val and '2 WEEK' not in val:
                     status = 'DAYS BEFORE EXPIRY (ORANGE)'
                 elif '2-WEEK' in val or '2 WEEK' in val or '15 TO' in val:
-                    status = '2-WEEK NOTICE (YELLOW)'
-                elif 'SUFFICIENT' in val:
+                    status = 'DAYS BEFORE 2 WEEK NOTICE (YELLOW)'
+                elif 'SUFFICIENT' in val or '30 DAYS' in val:
                     status = 'SUFFICIENT TIME (GREEN)'
                 elif 'INPUT' in val:
                     status = 'PLEASE INPUT LAST REG (GRAY)'
                 elif 'REGISTERED' in val or 'YES' in val:
                     status = 'REGISTERED (BLUE)'
-                else: 
-                     # If the text is weird, assume registered to be safe
-                     status = 'REGISTERED (BLUE)'
 
             # Fallback if no alert mapped from Excel
             if not status:
@@ -381,7 +523,7 @@ def process_excel(filepath, manual_sheet_target=None):
         all_data.append((current_state, changed_records, sheet_name))
 
     if not all_data:
-        if manual_sheet_target is not None:
+        if is_manual_scan:
             print(f"{Fore.RED}No matching plates found.{Style.RESET_ALL}")
         return False
 
@@ -398,10 +540,9 @@ def process_excel(filepath, manual_sheet_target=None):
         for plate, state_tuple in combined_current_state.items():
             status, exp_date = state_tuple[0], state_tuple[1]
             print_status(f"[{plate}] {status}", status)
-            if 'EXPIRED' in status or 'DAYS BEFORE' in status or '2-WEEK' in status:
-                if status not in initial_alerts:
-                    initial_alerts[status] = []
-                initial_alerts[status].append(format_plate_with_date(plate, exp_date))
+            if status not in initial_alerts:
+                initial_alerts[status] = []
+            initial_alerts[status].append(format_plate_with_date(plate, exp_date))
         
         print(f"{Fore.CYAN}--- End Initial Scan ---{Style.RESET_ALL}")
         
@@ -410,61 +551,51 @@ def process_excel(filepath, manual_sheet_target=None):
         else:
              send_notification({"SUFFICIENT TIME (GREEN)": ["All Plates inside Excel File"]}, title="⚠ Initial Scan Results")
         
-    elif combined_changed_records or manual_sheet_target is not None:
+    elif combined_changed_records or is_manual_scan:
         # User requested a specific sheet or requested "Scan All"
-        if manual_sheet_target is not None:
-             print(f"\n{Fore.CYAN}[{datetime.now().strftime('%H:%M:%S')}] Manual Scan: {manual_sheet_target}{Style.RESET_ALL}")
-             title_text = f"⚠ Manual Scan: {manual_sheet_target}"
+        if is_manual_scan:
+             print(f"\n{Fore.CYAN}[{datetime.now().strftime('%H:%M:%S')}] Manual Scan Triggered{Style.RESET_ALL}")
+             title_text = f"⚠ Manual Scan: {manual_sheet_target if manual_sheet_target else 'All Sheets'}"
              
              manual_alerts = {}
+             # Just pull from the results of what we read!
              for plate, state_tuple in combined_current_state.items():
                  status, exp_date = state_tuple[0], state_tuple[1]
-                 if 'EXPIRED' in status or 'DAYS BEFORE' in status or '2-WEEK' in status:
-                     if status not in manual_alerts:
-                         manual_alerts[status] = []
-                     manual_alerts[status].append(format_plate_with_date(plate, exp_date))
+                 if status not in manual_alerts:
+                     manual_alerts[status] = []
+                 manual_alerts[status].append(format_plate_with_date(plate, exp_date))
              
              if manual_alerts:
                  send_notification(manual_alerts, title=title_text)
              else:
-                 send_notification({"SUFFICIENT TIME (GREEN)": [f"All vehicles in {manual_sheet_target} are valid."]}, title=title_text)
+                 send_notification({"SUFFICIENT TIME (GREEN)": [f"All vehicles checked are valid."]}, title=title_text)
              return True
 
-        if manual_sheet_target is None:
-             print(f"\n{Fore.CYAN}[{datetime.now().strftime('%H:%M:%S')}] Change Detected!{Style.RESET_ALL}")
+        if not is_manual_scan:
+             print(f"\n{Fore.CYAN}[{datetime.now().strftime('%H:%M:%S')}] Background Change Detected!{Style.RESET_ALL}")
+             changed_sheets = list(set([r['sheet'] for r in combined_changed_records]))
+             sheet_title_str = ", ".join(changed_sheets) if len(changed_sheets) < 3 else f"{len(changed_sheets)} Sheets"
              
-        summary_alerts = {}
-        for record in combined_changed_records:
-            plate = record['plate']
-            old = record['old_status']
-            new = record['new_status']
-            sheet = record['sheet']
-            exp_date = record['exp_date']
-            if manual_sheet_target is None:
-                 print_status(f"Update ({sheet}): [{plate}] {old} -> {new}", new)
+             for record in combined_changed_records:
+                 plate = record['plate']
+                 old = record['old_status']
+                 new = record['new_status']
+                 sheet = record['sheet']
+                 print_status(f"Real-time Update ({sheet}): [{plate}] {old} -> {new}", new)
+                 
+             # Send comprehensive updated state so UI refreshes real-time
+             full_alerts = {}
+             for plate, state_tuple in combined_current_state.items():
+                 status, exp_date = state_tuple[0], state_tuple[1]
+                 if status not in full_alerts:
+                     full_alerts[status] = []
+                 full_alerts[status].append(format_plate_with_date(plate, exp_date))
+                     
+             if full_alerts:
+                 send_notification(full_alerts, title=f"⚠ Real-time File Update: {sheet_title_str}")
+             else:
+                 send_notification({"SUFFICIENT TIME (GREEN)": ["All Vehicles clear in latest update!"]}, title=f"⚠ Real-time File Update: {sheet_title_str}")
             
-            if 'EXPIRED' in new or 'DAYS BEFORE' in new or '2-WEEK' in new:
-                if new not in summary_alerts:
-                    summary_alerts[new] = []
-                summary_alerts[new].append(format_plate_with_date(plate, exp_date))
-                
-        if summary_alerts:
-            # If the user did "Scan All", manual_sheet_target is None, but combined_changed_records would be empty since it's just checking states
-            # Wait, "Scan All" triggers a process_excel(EXCEL_FILE) which just recalculates states. We must send a summary of EVERYTHING if they clicked it!
-            pass # See check below
-            
-    # CRITICAL: If they clicked Scan All, it passes manual_sheet_target=None, but it's NOT the first run! 
-    # Therefore changed_records will be empty if no files changed. 
-    # But they just clicked the button, so they expect a popup immediately showing all expired!
-    # Let's check if there are no changes but it was triggered manually.
-    if manual_sheet_target is None and not first_run:
-        # Check if we were called rapidly from the tray or button without file change?
-        # A bit tricky. We assume if it came from the thread, it's either the file watcher or Scan All.
-        # It's safer if Scan All prints the whole state again.
-        # But for now, let's keep the file watcher working mostly.
-        # For a manually triggered "Scan All", we will send the full list!
-        pass
-
     if manual_sheet_target is None:
         previous_state = combined_current_state
         first_run = False
@@ -480,7 +611,8 @@ def background_monitor():
             if os.path.exists(EXCEL_FILE):
                 current_mtime = os.path.getmtime(EXCEL_FILE)
                 if current_mtime != last_mtime:
-                    time.sleep(1)
+                    # Added slightly more sleep to avoid lock race conditions with heavy Excel saves
+                    time.sleep(2)
                     process_excel(EXCEL_FILE)
                     try:
                         last_mtime = os.path.getmtime(EXCEL_FILE)
@@ -493,28 +625,12 @@ def background_monitor():
 # Manual Scan All via Tray (Sends entire overview)
 def on_scan_all(icon, item):
     print("Manually Scanning All...")
-    # Generate full report of current state!
-    if previous_state:
-        full_alerts = {}
-        for plate, state_tuple in previous_state.items():
-            status, exp_date = state_tuple[0], state_tuple[1]
-            if 'EXPIRED' in status or 'DAYS BEFORE' in status or '2-WEEK' in status:
-                if status not in full_alerts:
-                    full_alerts[status] = []
-                full_alerts[status].append(format_plate_with_date(plate, exp_date))
-        
-        if full_alerts:
-             send_notification(full_alerts, title="⚠ Scan All Results")
-        else:
-             send_notification({"SUFFICIENT TIME (GREEN)": ["All Vehicles Registered"]}, title="⚠ Scan All Results")
-    else:
-        # If not initialized, process it
-        process_excel(EXCEL_FILE)
+    process_excel(EXCEL_FILE, is_manual_scan=True)
     
 def make_scan_sheet_callback(sheet_name):
     def callback(icon, item):
         print(f"Manually Scanning: {sheet_name}")
-        process_excel(EXCEL_FILE, manual_sheet_target=sheet_name)
+        process_excel(EXCEL_FILE, manual_sheet_target=sheet_name, is_manual_scan=True)
     return callback
 
 def on_exit(icon, item):

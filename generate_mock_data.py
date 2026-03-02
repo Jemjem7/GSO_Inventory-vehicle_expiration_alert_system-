@@ -19,8 +19,8 @@ def create_mock_excel():
     }
     
     df = pd.DataFrame(data)
-    df.to_excel('VehicleMonitoring.xlsx', index=False, engine='openpyxl')
-    print("Mock Excel file 'VehicleMonitoring.xlsx' created successfully.")
+    df.to_excel('VehicleMonitoring1.xlsx', index=False, engine='openpyxl')
+    print("Mock Excel file 'VehicleMonitoring1.xlsx' created successfully.")
 
 if __name__ == "__main__":
     create_mock_excel()
