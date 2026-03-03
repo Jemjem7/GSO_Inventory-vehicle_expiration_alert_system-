@@ -11,12 +11,13 @@ from datetime import datetime
 import colorama
 from colorama import Fore, Style
 import pystray
+import socket
 from PIL import Image, ImageDraw
 import traceback
 import tkinter as tk
 from tkinter import ttk
 import winsound
-import xlwings as xw
+import win32com.client
 
 colorama.init(autoreset=True)
 
@@ -104,11 +105,9 @@ def get_expiration_status(exp_date, status_override):
         today = datetime.now().date()
         delta_days = (target_date - today).days
 
-        if delta_days <= 0:
+        if delta_days < 0:
             return 'EXPIRED (RED)'
-        elif 1 <= delta_days <= 7:
-            return '1-WEEK ADVANCE (RED-ORANGE)'
-        elif 8 <= delta_days <= 14:
+        elif 0 <= delta_days <= 14:
             return 'DAYS BEFORE EXPIRY (ORANGE)'
         elif 15 <= delta_days <= 29:
             return 'DAYS BEFORE 2 WEEK NOTICE (YELLOW)'
@@ -128,7 +127,7 @@ class AlertWindow(tk.Tk):
         self.withdraw() # Hide immediately on launch
         
         window_width = 580
-        window_height = 380
+        window_height = 410
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
         x = screen_width - window_width - 20
@@ -137,12 +136,21 @@ class AlertWindow(tk.Tk):
         
         self.main_container = tk.Frame(self)
         self.main_container.pack(fill=tk.BOTH, expand=True)
+        self.clock_after_id = None
 
         # Trap protocol so the user simply HIDES the window on X, no destroying!
         self.protocol("WM_DELETE_WINDOW", self.hide_window)
         
         # Start checking the queue
         self.check_queue()
+
+    def update_clock(self):
+        if hasattr(self, 'clock_label') and self.clock_label.winfo_exists():
+            now = datetime.now()
+            time_str = now.strftime("%I:%M:%S %p")
+            date_str = now.strftime("%m/%d/%Y")
+            self.clock_label.config(text=f"{date_str}   |   {time_str}")
+            self.clock_after_id = self.after(1000, self.update_clock)
 
     def hide_window(self):
         self.withdraw()
@@ -152,14 +160,16 @@ class AlertWindow(tk.Tk):
             while True:
                 msg = gui_queue.get_nowait()
                 if msg['type'] == 'show':
-                    # Play sound without blocking
-                    def play_alert():
-                        try:
-                            winsound.Beep(1500, 150)
-                            winsound.Beep(2000, 250)
-                        except:
-                            pass
-                    threading.Thread(target=play_alert, daemon=True).start()
+                    # Play sound without blocking if it was an automatic background scan
+                    if msg.get('is_auto', False):
+                        def play_alert():
+                            try:
+                                # Bell-like chime (Single strike with slight resonance)
+                                winsound.Beep(1200, 300) 
+                                winsound.Beep(800, 200) 
+                            except:
+                                pass
+                        threading.Thread(target=play_alert, daemon=True).start()
                     
                     self.build_ui(msg['alerts'], msg['title'])
                     self.deiconify()
@@ -185,6 +195,10 @@ class AlertWindow(tk.Tk):
         self.last_alerts = detailed_alerts
         self.last_title = window_title
         
+        if getattr(self, 'clock_after_id', None):
+            self.after_cancel(self.clock_after_id)
+            self.clock_after_id = None
+            
         for w in self.main_container.winfo_children():
             w.destroy()
             
@@ -200,10 +214,11 @@ class AlertWindow(tk.Tk):
             stripe_2 = '#35363A'
             importance_order = [
                 ('EXPIRED', '#F28B82'),
-                ('1-WEEK ADVANCE', '#FF8A65'),
                 ('DAYS BEFORE EXPIRY', '#FDC69C'),
-                ('DAYS BEFORE 2 WEEK NOTICE', '#FCE8E6'),
-                ('PLEASE INPUT LAST REG', '#9AA0A6')
+                ('DAYS BEFORE 2 WEEK NOTICE', '#FDE293'),
+                ('SUFFICIENT TIME', '#81C995'),
+                ('PLEASE INPUT LAST REG', '#9AA0A6'),
+                ('REGISTERED', '#8AB4F8')
             ]
         else:
             bg_color = '#F1F3F4'
@@ -215,44 +230,90 @@ class AlertWindow(tk.Tk):
             stripe_2 = '#F8F9FA'
             importance_order = [
                 ('EXPIRED', '#D93025'),
-                ('1-WEEK ADVANCE', '#F4511E'),
                 ('DAYS BEFORE EXPIRY', '#E37400'),
-                ('DAYS BEFORE 2 WEEK NOTICE', '#F29900'),
-                ('PLEASE INPUT LAST REG', '#80868B')
+                ('DAYS BEFORE 2 WEEK NOTICE', '#F9AB00'),
+                ('SUFFICIENT TIME', '#188038'),
+                ('PLEASE INPUT LAST REG', '#80868B'),
+                ('REGISTERED', '#1A73E8')
             ]
             
         self.configure(bg=bg_color)
         self.main_container.configure(bg=bg_color)
+        
+        # Use the main container for placing elements securely
+        
+        # Dedicated top bar 
+        top_bar = tk.Frame(self.main_container, bg=bg_color)
+        top_bar.pack(fill=tk.X, padx=20, pady=(15, 5))
             
-        header = tk.Label(self.main_container, text=window_title, font=("Segoe UI", 14, "bold"), bg=bg_color, fg=fg_color)
-        header.pack(pady=(20, 10))
+        header = tk.Label(top_bar, text=window_title, font=("Segoe UI", 14, "bold"), bg=bg_color, fg=fg_color)
+        header.pack(side=tk.LEFT, expand=True, anchor="center")
         
         summary_frame = tk.Frame(self.main_container, bg=panel_bg, bd=0)
-        summary_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 10))
+        summary_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(5, 10))
+        
+        # Clock inside the panel directly
+        clock_frame = tk.Frame(summary_frame, bg=panel_bg)
+        clock_frame.pack(fill=tk.X, pady=(10, 5), padx=10)
+        self.clock_label = tk.Label(clock_frame, text="", font=("Segoe UI", 14, "bold"), bg=panel_bg, fg=fg_color)
+        self.clock_label.pack()
+        self.update_clock()
         
         has_alerts = False
         
+        # Calculate stats
+        expired_count = 0
+        expired_by_month = {}
+        for full_status, plates in detailed_alerts.items():
+            if "EXPIRED" in full_status and isinstance(plates, list):
+                for p_str in plates:
+                    expired_count += 1
+                    parts = str(p_str).split('||')
+                    date_val = parts[2] if len(parts) >= 3 else "N/A"
+                    try:
+                        dt = datetime.strptime(date_val, '%Y-%m-%d')
+                        month_name = dt.strftime('%b %Y')
+                    except:
+                        month_name = "Unknown Date"
+                    expired_by_month[month_name] = expired_by_month.get(month_name, 0) + 1
+                    
+        # Add Stats Label
+        self.stats_label = tk.Label(summary_frame, text="", font=("Segoe UI", 11, "bold"), bg=panel_bg, fg=fg_color)
+        if expired_count > 0:
+            month_stats = " | ".join([f"{k}: {v}" for k, v in expired_by_month.items()])
+            stats_text = f"Total Expired: {expired_count}    ({month_stats})"
+        else:
+            stats_text = "Total Expired: 0"
+        self.stats_label.config(text=stats_text)
+        self.stats_label.pack(pady=(0, 10))
+        
         # Setup Treeview Table
-        columns = ("plate", "date", "status", "sheet")
+        columns = ("plate", "owner", "date", "status", "sheet")
         tree = ttk.Treeview(summary_frame, columns=columns, show="headings", style="Custom.Treeview", height=10)
         
         tree.heading("plate", text="Plate Number", anchor=tk.W)
-        tree.heading("date", text="Expiration / Status", anchor=tk.W)
+        tree.heading("owner", text="Owner", anchor=tk.W)
+        tree.heading("date", text="Expiration Date", anchor=tk.W)
         tree.heading("status", text="Condition", anchor=tk.W)
         tree.heading("sheet", text="Sheet", anchor=tk.W) # Hidden column for data storage
         
-        tree.column("plate", width=150, minwidth=120, stretch=tk.NO)
-        tree.column("date", width=150, minwidth=120, stretch=tk.NO)
-        tree.column("status", width=220, minwidth=180, stretch=tk.YES)
+        tree.column("plate", width=110, minwidth=100, stretch=tk.NO)
+        tree.column("owner", width=140, minwidth=110, stretch=tk.YES)
+        tree.column("date", width=120, minwidth=100, stretch=tk.NO)
+        tree.column("status", width=200, minwidth=150, stretch=tk.YES)
         # Hide the sheet column from view but keep it in the data structure
         tree.column("sheet", width=0, minwidth=0, stretch=tk.NO)
         
         scrollbar = ttk.Scrollbar(summary_frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scrollbar.set)
         
-        # Setup row striping tags
-        tree.tag_configure('evenrow', background=stripe_1)
-        tree.tag_configure('oddrow', background=stripe_2)
+        # Setup clean row styling (remove striping backgrounds)
+        tree.tag_configure('evenrow', background=bg_color)
+        tree.tag_configure('oddrow', background=bg_color)
+        
+        # Hover effect styling
+        hover_color = '#35363A' if actual_theme == 'Dark' else '#E8EAED'
+        tree.tag_configure('hover', background=hover_color)
         
         # Sort out and display
         row_count = 0
@@ -280,78 +341,114 @@ class AlertWindow(tk.Tk):
                 for p_str in matching_plates:
                     p_str = str(p_str)
                     parts = p_str.split('||')
-                    if len(parts) == 3:
+                    if len(parts) == 4:
+                        plate, owner, date_val, sheet_name = parts
+                    elif len(parts) == 3:
                         plate, date_val, sheet_name = parts
+                        owner = "Unknown"
                     elif len(parts) == 2:
                         plate, date_val = parts
+                        owner = "Unknown"
                         sheet_name = "Unknown"
                     else:
                         plate = p_str
+                        owner = "Unknown"
                         date_val = "N/A"
                         sheet_name = "Unknown"
                         
                     # Insert row
                     stripe_tag = 'evenrow' if row_count % 2 == 0 else 'oddrow'
-                    tree.insert("", tk.END, values=(plate, date_val, status_key, sheet_name), tags=(status_key, stripe_tag))
+                    tree.insert("", tk.END, values=(plate, owner, date_val, status_key, sheet_name), tags=(status_key, stripe_tag))
                     row_count += 1
                     has_alerts = True
                     
         if has_alerts:
+            last_click_time = [0.0]
             def on_row_click(event):
                 # Only open if they clicked on an actual item
+                current_time = time.time()
+                if current_time - last_click_time[0] < 2.0:
+                    return # Debounce multiple clicks
+                    
                 region = tree.identify("region", event.x, event.y)
                 if region == "cell" or region == "tree":
                     item_id = tree.identify_row(event.y)
                     if item_id:
                         values = tree.item(item_id, 'values')
-                        if len(values) >= 4:
-                            target_sheet = values[3]
-                            
+                        if len(values) >= 5: # Get the sheet name from the hidden column
+                            sheet_to_open = values[4]
+                            last_click_time[0] = current_time
                             def open_excel_threaded():
                                 try:
+                                    # Use COM to open the file and select the specific sheet
+                                    excel = win32com.client.DispatchEx("Excel.Application")
+                                    excel.Visible = True
                                     abs_path = os.path.abspath(EXCEL_FILE)
-                                    target_wb_name = os.path.basename(EXCEL_FILE)
-                                    
-                                    wb_found = None
-                                    app_found = None
-                                    
-                                    # Search through all active Excel instances
-                                    for app in xw.apps:
-                                        for book in app.books:
-                                            if book.name == target_wb_name:
-                                                wb_found = book
-                                                app_found = app
-                                                break
-                                        if wb_found:
+                                    # Check if already open
+                                    wb = None
+                                    for w in excel.Workbooks:
+                                        if w.FullName == abs_path:
+                                            wb = w
                                             break
-                                            
-                                    if wb_found:
-                                        app = app_found
-                                        wb = wb_found
-                                    else:
-                                        # If not open anywhere, start it
-                                        app = xw.App(visible=True)
-                                        wb = app.books.open(abs_path)
-                                        
-                                    app.visible = True
-                                    try:
-                                        app.activate(steal_focus=True)
-                                    except:
-                                        pass
+                                    if not wb:
+                                        wb = excel.Workbooks.Open(abs_path)
                                     
-                                    if target_sheet in [s.name for s in wb.sheets]:
-                                        wb.sheets[target_sheet].activate()
-                                        
-                                except Exception as e:
-                                    print(f"Failed to open/activate Excel via xlwings: {e}")
+                                    # Try to activate the specific sheet
                                     try:
-                                        os.startfile(EXCEL_FILE) # Fallback to standard open
+                                        if sheet_to_open and sheet_to_open != "Unknown" and sheet_to_open in [sh.Name for sh in wb.Sheets]:
+                                            wb.Sheets(sheet_to_open).Activate()
+                                    except Exception as e:
+                                        print(f"Failed to activate sheet {sheet_to_open}: {e}")
+                                            
+                                    # Bring window to front
+                                    try:
+                                        import win32gui
+                                        import win32con
+                                        hwnd = excel.Hwnd
+                                        if hwnd:
+                                            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                                            win32gui.SetForegroundWindow(hwnd)
                                     except:
                                         pass
-                                        
+
+                                except Exception as e:
+                                    print(f"Failed to open file via COM: {e}. Falling back to native open.")
+                                    os.startfile(EXCEL_FILE)
+                                    
                             threading.Thread(target=open_excel_threaded, daemon=True).start()
                         
+            # Hover fading light effect
+            self.last_hovered_item = None
+            def on_tree_motion(event):
+                item = tree.identify_row(event.y)
+                if item != self.last_hovered_item:
+                    # Clear previous hover
+                    if self.last_hovered_item and tree.exists(self.last_hovered_item):
+                        tags = list(tree.item(self.last_hovered_item, "tags"))
+                        if "hover" in tags:
+                            tags.remove("hover")
+                            tree.item(self.last_hovered_item, tags=tags)
+                            
+                    # Set new hover
+                    if item:
+                        tags = list(tree.item(item, "tags"))
+                        if "hover" not in tags:
+                            tags.append("hover")
+                            tree.item(item, tags=tags)
+                    
+                    self.last_hovered_item = item
+                    
+            def on_tree_leave(event):
+                if self.last_hovered_item and tree.exists(self.last_hovered_item):
+                    tags = list(tree.item(self.last_hovered_item, "tags"))
+                    if "hover" in tags:
+                        tags.remove("hover")
+                        tree.item(self.last_hovered_item, tags=tags)
+                self.last_hovered_item = None
+
             tree.bind("<ButtonRelease-1>", on_row_click)
+            tree.bind("<Motion>", on_tree_motion)
+            tree.bind("<Leave>", on_tree_leave)
             
             tree.pack(side="left", fill="both", expand=True)
             scrollbar.pack(side="right", fill="y")
@@ -438,23 +535,24 @@ class AlertWindow(tk.Tk):
             self.status_lbl.config(text=f"Scanning {selection} in background...")
             threading.Thread(target=process_excel, args=(EXCEL_FILE, selection, True), daemon=True).start()
 
-def send_notification(detailed_alerts, title="⚠ Vehicle Update Detected"):
+def send_notification(detailed_alerts, title="⚠ Vehicle Update Detected", is_auto=False):
     if not detailed_alerts:
         return
-    gui_queue.put({'type': 'show', 'alerts': detailed_alerts, 'title': title})
+    gui_queue.put({'type': 'show', 'alerts': detailed_alerts, 'title': title, 'is_auto': is_auto})
 
-def format_plate_with_date(plate, exp_date, sheet_name="Unknown"):
+def format_plate_with_date(plate, exp_date, sheet_name="Unknown", owner="Unknown"):
     if pd.isna(exp_date) or str(exp_date).strip() == '':
-        return f"{plate}||N/A||{sheet_name}"
-    try:
-        if not hasattr(exp_date, 'strftime'):
-            exp_date_str = str(exp_date).replace('\\', '/')
-            exp_date = pd.to_datetime(exp_date_str, dayfirst=True)
+        dt_str = "N/A"
+    else:
+        try:
+            if not hasattr(exp_date, 'strftime'):
+                exp_date_str = str(exp_date).replace('\\', '/')
+                exp_date = pd.to_datetime(exp_date_str, dayfirst=True)
+            dt_str = exp_date.strftime('%Y-%m-%d')
+        except:
+            dt_str = str(exp_date)
             
-        dt_str = exp_date.strftime('%Y-%m-%d')
-        return f"{plate}||{dt_str}||{sheet_name}"
-    except:
-        return f"{plate}||{exp_date}||{sheet_name}"
+    return f"{plate}||{owner}||{dt_str}||{sheet_name}"
 
 def find_header_row(excel_file_obj, sheet_name):
     """
@@ -480,8 +578,18 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
             return False
 
         # To avoid file lock/sharing violations, read file into memory first
-        with open(filepath, 'rb') as f:
-            file_buffer = io.BytesIO(f.read())
+        # Implement retry logic for file reading to avoid crashes when Excel is saving
+        file_buffer = None
+        for attempt in range(4):
+            try:
+                with open(filepath, 'rb') as f:
+                    file_buffer = io.BytesIO(f.read())
+                break
+            except PermissionError as pe:
+                if attempt < 3:
+                    time.sleep(1)
+                else:
+                    raise pe
 
         # Load specific sheet or all sheets
         with pd.ExcelFile(file_buffer, engine='openpyxl') as xl:
@@ -516,7 +624,10 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
         plate_col_candidates = [c for c in df_sheet.columns if 'PLATE' in str(c).upper()]
         plate_col = plate_col_candidates[0] if plate_col_candidates else 'PLATE #'
         
-        exp_col_candidates = [c for c in df_sheet.columns if 'REMINDER' in str(c).upper()]
+        owner_col_candidates = [c for c in df_sheet.columns if 'NAME' in str(c).upper() or 'OWNER' in str(c).upper() or 'CUSTOMER' in str(c).upper()]
+        owner_col = owner_col_candidates[0] if owner_col_candidates else None
+        
+        exp_col_candidates = [c for c in df_sheet.columns if 'REMINDER' in str(c).upper() or 'DATE' in str(c).upper()]
         exp_col = exp_col_candidates[0] if exp_col_candidates else 'REMINDER'
         
         status_col_keys = [c for c in df_sheet.columns if 'REGISTERED' in str(c).upper()]
@@ -533,6 +644,8 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
         
         for index, row in df_sheet.iterrows():
             plate = row[plate_col]
+            owner = str(row[owner_col]).strip() if owner_col and pd.notna(row[owner_col]) else "Unknown"
+            
             if pd.isna(plate) or str(plate).strip() == '' or str(plate).upper() == 'CRITERIA':
                 # Avoid breaking fully if there is just an empty row, unless it explicitly says CRITERIA
                 if str(plate).upper() == 'CRITERIA':
@@ -546,15 +659,13 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
             # NATIVE EXCEL ALERT READING
             if alert_col and pd.notna(row[alert_col]) and str(row[alert_col]).strip() != '':
                 val = str(row[alert_col]).strip().upper()
-                if 'EXPIRED' in val:
+                if 'EXPIRED' in val or 'LESS THAN' in val:
                     status = 'EXPIRED (RED)'
-                elif '1 WEEK' in val or '1-WEEK' in val or '7 DAYS' in val:
-                    status = '1-WEEK ADVANCE (RED-ORANGE)'
-                elif 'DAYS BEFORE' in val and 'NOTICE' not in val and '2-WEEK' not in val and '2 WEEK' not in val:
+                elif '1 TO 14' in val or '1-14' in val or ('EXPIRY' in val and 'BEFORE' in val):
                     status = 'DAYS BEFORE EXPIRY (ORANGE)'
-                elif '2-WEEK' in val or '2 WEEK' in val or '15 TO' in val:
+                elif '15 TO 29' in val or '15-29' in val or '2 WEEK' in val or '2-WEEK' in val:
                     status = 'DAYS BEFORE 2 WEEK NOTICE (YELLOW)'
-                elif 'SUFFICIENT' in val or '30 DAYS' in val:
+                elif 'SUFFICIENT' in val or '30 DAYS' in val or 'MORE' in val:
                     status = 'SUFFICIENT TIME (GREEN)'
                 elif 'INPUT' in val:
                     status = 'PLEASE INPUT LAST REG (GRAY)'
@@ -570,20 +681,25 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                         status_override = 'REGISTERED'
                 status = get_expiration_status(exp_date, status_override)
                 
-            current_state[plate] = (status, exp_date, sheet_name)
+            current_state[plate] = (status, exp_date, sheet_name, owner)
             
             if not first_run or manual_sheet_target is not None:
                 old_state = previous_state.get(plate, None)
                 if old_state is not None:
-                    if len(old_state) == 3:
+                    if len(old_state) == 4:
+                        old_status, old_exp, old_sheet, old_owner = old_state
+                    elif len(old_state) == 3:
                         old_status, old_exp, old_sheet = old_state
+                        old_owner = "Unknown"
                     else:
                         old_status, old_exp = old_state
                         old_sheet = "Unknown"
+                        old_owner = "Unknown"
                         
                     if old_status != status or old_exp != exp_date or old_sheet != sheet_name:
                         changed_records.append({
                             'plate': plate,
+                            'owner': owner,
                             'old_status': old_status,
                             'new_status': status,
                             'sheet': sheet_name,
@@ -592,6 +708,7 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                 elif old_state is None and ('EXPIRED' in status or 'DAYS BEFORE' in status or '2-WEEK' in status or '1-WEEK' in status):
                      changed_records.append({
                         'plate': plate,
+                        'owner': owner,
                         'old_status': 'NEW RECORD',
                         'new_status': status,
                         'sheet': sheet_name,
@@ -625,9 +742,9 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
         print(f"{Fore.CYAN}--- End Initial Scan ---{Style.RESET_ALL}")
         
         if initial_alerts:
-             send_notification(initial_alerts, title="⚠ Initial Scan Results")
+             send_notification(initial_alerts, title="⚠ Initial Scan Results", is_auto=True)
         else:
-             send_notification({"SUFFICIENT TIME (GREEN)": ["All Plates inside Excel File"]}, title="⚠ Initial Scan Results")
+             send_notification({"SUFFICIENT TIME": ["All Plates inside Excel File"]}, title="⚠ Initial Scan Results", is_auto=True)
         
     elif combined_changed_records or is_manual_scan:
         # User requested a specific sheet or requested "Scan All"
@@ -638,15 +755,15 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
              manual_alerts = {}
              # Just pull from the results of what we read!
              for plate, state_tuple in combined_current_state.items():
-                 status, exp_date, sheet_name = state_tuple[0], state_tuple[1], state_tuple[2]
+                 status, exp_date, sheet_name, owner = state_tuple[0], state_tuple[1], state_tuple[2], state_tuple[3] if len(state_tuple) > 3 else "Unknown"
                  if status not in manual_alerts:
                      manual_alerts[status] = []
-                 manual_alerts[status].append(format_plate_with_date(plate, exp_date, sheet_name))
+                 manual_alerts[status].append(format_plate_with_date(plate, exp_date, sheet_name, owner))
              
              if manual_alerts:
-                 send_notification(manual_alerts, title=title_text)
+                 send_notification(manual_alerts, title=title_text, is_auto=False)
              else:
-                 send_notification({"SUFFICIENT TIME (GREEN)": [f"All vehicles checked are valid."]}, title=title_text)
+                 send_notification({"SUFFICIENT TIME": [f"All vehicles checked are valid."]}, title=title_text, is_auto=False)
              return True
 
         if not is_manual_scan:
@@ -656,23 +773,24 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
              
              for record in combined_changed_records:
                  plate = record['plate']
+                 owner = record.get('owner', 'Unknown')
                  old = record['old_status']
                  new = record['new_status']
                  sheet = record['sheet']
-                 print_status(f"Real-time Update ({sheet}): [{plate}] {old} -> {new}", new)
+                 print_status(f"Real-time Update ({sheet}): [{plate}] ({owner}) {old} -> {new}", new)
                  
              # Send comprehensive updated state so UI refreshes real-time
              full_alerts = {}
              for plate, state_tuple in combined_current_state.items():
-                 status, exp_date, sheet_name = state_tuple[0], state_tuple[1], state_tuple[2]
+                 status, exp_date, sheet_name, owner = state_tuple[0], state_tuple[1], state_tuple[2], state_tuple[3] if len(state_tuple) > 3 else "Unknown"
                  if status not in full_alerts:
                      full_alerts[status] = []
-                 full_alerts[status].append(format_plate_with_date(plate, exp_date, sheet_name))
+                 full_alerts[status].append(format_plate_with_date(plate, exp_date, sheet_name, owner))
                      
              if full_alerts:
-                 send_notification(full_alerts, title=f"⚠ Real-time File Update: {sheet_title_str}")
+                 send_notification(full_alerts, title=f"⚠ Real-time File Update: {sheet_title_str}", is_auto=True)
              else:
-                 send_notification({"SUFFICIENT TIME (GREEN)": ["All Vehicles clear in latest update!"]}, title=f"⚠ Real-time File Update: {sheet_title_str}")
+                 send_notification({"SUFFICIENT TIME": ["All Vehicles clear in latest update!"]}, title=f"⚠ Real-time File Update: {sheet_title_str}", is_auto=True)
             
     if manual_sheet_target is None:
         previous_state = combined_current_state
@@ -683,9 +801,16 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
 def background_monitor():
     global monitor_active
     last_mtime = 0
+    last_checked_date = datetime.now().date()
     
     while monitor_active:
         try:
+            current_date = datetime.now().date()
+            if current_date != last_checked_date:
+                # Force rescan automatically at midnight/new day
+                last_mtime = 0 
+                last_checked_date = current_date
+                
             if os.path.exists(EXCEL_FILE):
                 current_mtime = os.path.getmtime(EXCEL_FILE)
                 if current_mtime != last_mtime:
@@ -738,6 +863,36 @@ def pystray_runner():
     tray_icon.run()
 
 def main():
+    # --- Single Instance Lock ---
+    global lock_socket
+    lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        lock_socket.bind(('127.0.0.1', 47123))
+        
+        def listen_for_triggers():
+            while monitor_active:
+                try:
+                    lock_socket.settimeout(1.0)
+                    data, _ = lock_socket.recvfrom(1024)
+                    if data == b'trigger':
+                        print("Received trigger from another instance!")
+                        threading.Thread(target=process_excel, args=(EXCEL_FILE,), kwargs={'is_manual_scan': True}, daemon=True).start()
+                except socket.timeout:
+                    continue
+                except Exception as e:
+                    break
+                    
+        threading.Thread(target=listen_for_triggers, daemon=True).start()
+    except socket.error:
+        print("Vehicle Monitor is already running. Pinging the active instance...")
+        try:
+            client_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            client_sock.sendto(b'trigger', ('127.0.0.1', 47123))
+        except:
+            pass
+        sys.exit(0)
+    # --- End Single Instance Lock ---
+    
     print(f"{Fore.GREEN}Starting Vehicle Monitor Dashboard...{Style.RESET_ALL}")
     
     # Pre-scan the initial file so tray menu builds immediately
