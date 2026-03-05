@@ -107,10 +107,12 @@ def get_expiration_status(exp_date, status_override):
 
         if delta_days < 0:
             return 'EXPIRED (RED)'
-        elif 0 <= delta_days <= 14:
-            return 'DAYS BEFORE EXPIRY (ORANGE)'
-        elif 15 <= delta_days <= 29:
-            return 'DAYS BEFORE 2 WEEK NOTICE (YELLOW)'
+        elif 0 <= delta_days <= 7:
+            return '1 WEEK BEFORE EXPIRY (RED)'
+        elif 8 <= delta_days <= 30:
+            return '1 MONTH BEFORE EXPIRY (ORANGE)'
+        elif 31 <= delta_days <= 60:
+            return '2 MONTHS BEFORE EXPIRY (YELLOW)'
         else:
             return 'SUFFICIENT TIME (GREEN)'
     except Exception as e:
@@ -126,12 +128,12 @@ class AlertWindow(tk.Tk):
         self.last_title = ""
         self.withdraw() # Hide immediately on launch
         
-        window_width = 580
-        window_height = 410
+        window_width = 1300
+        window_height = 750
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
-        x = screen_width - window_width - 20
-        y = screen_height - window_height - 60
+        x = (screen_width // 2) - (window_width // 2)
+        y = (screen_height // 2) - (window_height // 2)
         self.geometry(f"{window_width}x{window_height}+{x}+{y}")
         
         self.main_container = tk.Frame(self)
@@ -213,6 +215,9 @@ class AlertWindow(tk.Tk):
             stripe_1 = '#2D2E31'
             stripe_2 = '#35363A'
             importance_order = [
+                ('1 WEEK BEFORE EXPIRY', '#F28B82'),
+                ('1 MONTH BEFORE EXPIRY', '#FDC69C'),
+                ('2 MONTHS BEFORE EXPIRY', '#FDE293'),
                 ('EXPIRED', '#F28B82'),
                 ('DAYS BEFORE EXPIRY', '#FDC69C'),
                 ('DAYS BEFORE 2 WEEK NOTICE', '#FDE293'),
@@ -229,6 +234,9 @@ class AlertWindow(tk.Tk):
             stripe_1 = '#FFFFFF'
             stripe_2 = '#F8F9FA'
             importance_order = [
+                ('1 WEEK BEFORE EXPIRY', '#D93025'),
+                ('1 MONTH BEFORE EXPIRY', '#E37400'),
+                ('2 MONTHS BEFORE EXPIRY', '#F9AB00'),
                 ('EXPIRED', '#D93025'),
                 ('DAYS BEFORE EXPIRY', '#E37400'),
                 ('DAYS BEFORE 2 WEEK NOTICE', '#F9AB00'),
@@ -243,12 +251,45 @@ class AlertWindow(tk.Tk):
         # Use the main container for placing elements securely
         
         # Dedicated top bar 
-        top_bar = tk.Frame(self.main_container, bg=bg_color)
-        top_bar.pack(fill=tk.X, padx=20, pady=(15, 5))
+        top_bar = tk.Frame(self.main_container, bg="black")
+        top_bar.pack(fill=tk.X, padx=0, pady=(0, 5))
             
-        header = tk.Label(top_bar, text=window_title, font=("Segoe UI", 14, "bold"), bg=bg_color, fg=fg_color)
-        header.pack(side=tk.LEFT, expand=True, anchor="center")
+        banner_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "banner.jpg")
+        logo_left_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_left.png")
+        logo_right_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo_right.png")
         
+        try:
+            from PIL import Image, ImageTk
+            # Left Logo
+            if os.path.exists(logo_left_path):
+                img_l = Image.open(logo_left_path)
+                img_l.thumbnail((120, 120), Image.Resampling.LANCZOS)
+                self.logo_l_photo = ImageTk.PhotoImage(img_l)
+                ll_label = tk.Label(top_bar, image=self.logo_l_photo, bg="black")
+                ll_label.pack(side=tk.LEFT, padx=(40, 0), pady=10)
+            
+            # Right Logo
+            if os.path.exists(logo_right_path):
+                img_r = Image.open(logo_right_path)
+                img_r.thumbnail((120, 120), Image.Resampling.LANCZOS)
+                self.logo_r_photo = ImageTk.PhotoImage(img_r)
+                rr_label = tk.Label(top_bar, image=self.logo_r_photo, bg="black")
+                rr_label.pack(side=tk.RIGHT, padx=(0, 40), pady=10)
+        except Exception as e:
+            print(f"Error loading logos: {e}")
+            
+        header_text = "Republic of the Philippines\nLocal Government Unit of Manolo Fortich\nGENERAL SERVICE OFFICE\nVEHICULAR RECORDS"
+        header = tk.Label(top_bar, text=header_text, font=("Segoe UI", 16, "bold"), bg="black", fg="white", justify="center")
+        header.pack(expand=True, anchor="center", pady=15)
+        
+        # Pack bottom controls FIRST so they claim the bottom edge securely
+        self.status_lbl = tk.Label(self.main_container, text="", bg=bg_color, font=("Segoe UI", 9, "italic"), fg=sub_fg)
+        self.status_lbl.pack(side=tk.BOTTOM, pady=(5, 5))
+
+        btn_frame = tk.Frame(self.main_container, bg=bg_color)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=(0, 15))
+        
+        # Now pack the summary frame to expand and claim remaining space
         summary_frame = tk.Frame(self.main_container, bg=panel_bg, bd=0)
         summary_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=(5, 10))
         
@@ -265,16 +306,15 @@ class AlertWindow(tk.Tk):
         expired_count = 0
         expired_by_month = {}
         for full_status, plates in detailed_alerts.items():
-            if "EXPIRED" in full_status and isinstance(plates, list):
+            if ("EXPIRY" in full_status or "EXPIRED" in full_status) and isinstance(plates, list):
                 for p_str in plates:
                     expired_count += 1
-                    parts = str(p_str).split('||')
-                    date_val = parts[2] if len(parts) >= 3 else "N/A"
                     try:
-                        dt = datetime.strptime(date_val, '%Y-%m-%d')
-                        month_name = dt.strftime('%b %Y')
+                        data = json.loads(p_str)
+                        month_name = data.get("sheet", "Unknown")
                     except:
                         month_name = "Unknown Date"
+                    
                     expired_by_month[month_name] = expired_by_month.get(month_name, 0) + 1
                     
         # Add Stats Label
@@ -288,24 +328,42 @@ class AlertWindow(tk.Tk):
         self.stats_label.pack(pady=(0, 10))
         
         # Setup Treeview Table
-        columns = ("plate", "owner", "date", "status", "sheet")
-        tree = ttk.Treeview(summary_frame, columns=columns, show="headings", style="Custom.Treeview", height=10)
+        columns = ("office", "plate", "engine", "chassis", "brand", "year", "date", "cost", "acq", "owner", "status", "alert", "month", "sheet")
+        tree = ttk.Treeview(summary_frame, columns=columns, show="headings", style="Custom.Treeview", height=15)
         
-        tree.heading("plate", text="Plate Number", anchor=tk.W)
-        tree.heading("owner", text="Owner", anchor=tk.W)
-        tree.heading("date", text="Expiration Date", anchor=tk.W)
-        tree.heading("status", text="Condition", anchor=tk.W)
-        tree.heading("sheet", text="Sheet", anchor=tk.W) # Hidden column for data storage
+        tree.heading("office", text="OFFICE", anchor=tk.W)
+        tree.heading("plate", text="PLATE NUMBER", anchor=tk.W)
+        tree.heading("engine", text="ENGINE NUMBER", anchor=tk.W)
+        tree.heading("chassis", text="CHASSIS NO.", anchor=tk.W)
+        tree.heading("brand", text="BRAND/ BODY TYPE", anchor=tk.W)
+        tree.heading("year", text="YEAR MODEL", anchor=tk.W)
+        tree.heading("date", text="EXPIRATION DATE", anchor=tk.W)
+        tree.heading("cost", text="ACQUISITION COST", anchor=tk.W)
+        tree.heading("acq", text="ACQUISITION DATE", anchor=tk.W)
+        tree.heading("owner", text="ACCOUNTABLE PERSON", anchor=tk.W)
+        tree.heading("status", text="STATUS", anchor=tk.W)
+        tree.heading("alert", text="ALERT", anchor=tk.W)
+        tree.heading("month", text="MONTH", anchor=tk.W)
+        tree.heading("sheet", text="Sheet", anchor=tk.W) 
         
+        tree.column("office", width=70, minwidth=60, stretch=tk.NO)
         tree.column("plate", width=110, minwidth=100, stretch=tk.NO)
+        tree.column("engine", width=120, minwidth=100, stretch=tk.YES)
+        tree.column("chassis", width=120, minwidth=100, stretch=tk.YES)
+        tree.column("brand", width=120, minwidth=100, stretch=tk.YES)
+        tree.column("year", width=60, minwidth=50, stretch=tk.NO)
+        tree.column("date", width=110, minwidth=100, stretch=tk.NO)
+        tree.column("cost", width=90, minwidth=70, stretch=tk.NO)
+        tree.column("acq", width=110, minwidth=90, stretch=tk.NO)
         tree.column("owner", width=140, minwidth=110, stretch=tk.YES)
-        tree.column("date", width=120, minwidth=100, stretch=tk.NO)
-        tree.column("status", width=200, minwidth=150, stretch=tk.YES)
-        # Hide the sheet column from view but keep it in the data structure
+        tree.column("status", width=90, minwidth=80, stretch=tk.NO)
+        tree.column("alert", width=160, minwidth=120, stretch=tk.YES)
+        tree.column("month", width=90, minwidth=80, stretch=tk.NO)
         tree.column("sheet", width=0, minwidth=0, stretch=tk.NO)
         
         scrollbar = ttk.Scrollbar(summary_frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
+        h_scrollbar = ttk.Scrollbar(summary_frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=scrollbar.set, xscrollcommand=h_scrollbar.set)
         
         # Setup clean row styling (remove striping backgrounds)
         tree.tag_configure('evenrow', background=bg_color)
@@ -329,36 +387,37 @@ class AlertWindow(tk.Tk):
             if matching_plates:
                 def extract_date(p_str):
                     try:
-                        if '||' in str(p_str):
-                            part = str(p_str).split('||')[-1].strip()
-                            return datetime.strptime(part, '%Y-%m-%d')
-                        return datetime.max
+                        data = json.loads(p_str)
+                        d_str = data.get("date", "N/A")
+                        return datetime.strptime(d_str, '%Y-%m-%d')
                     except Exception:
                         return datetime.max
                         
                 matching_plates.sort(key=extract_date)
                 
                 for p_str in matching_plates:
-                    p_str = str(p_str)
-                    parts = p_str.split('||')
-                    if len(parts) == 4:
-                        plate, owner, date_val, sheet_name = parts
-                    elif len(parts) == 3:
-                        plate, date_val, sheet_name = parts
-                        owner = "Unknown"
-                    elif len(parts) == 2:
-                        plate, date_val = parts
-                        owner = "Unknown"
-                        sheet_name = "Unknown"
-                    else:
-                        plate = p_str
-                        owner = "Unknown"
-                        date_val = "N/A"
-                        sheet_name = "Unknown"
+                    try:
+                        data = json.loads(p_str)
+                    except:
+                        data = {}
+                        
+                    office = data.get("office", "")
+                    plate = data.get("plate", "Unknown")
+                    engine = data.get("engine", "")
+                    chassis = data.get("chassis", "")
+                    brand = data.get("brand", "")
+                    year = data.get("year", "")
+                    date_val = data.get("date", "N/A")
+                    cost = data.get("cost", "")
+                    acq_date = data.get("acq_date", "")
+                    owner = data.get("owner", "Unknown")
+                    phys_status = data.get("status", "")
+                    alert_val = data.get("alert", status_key)
+                    sheet_name = data.get("sheet", "Unknown")
                         
                     # Insert row
                     stripe_tag = 'evenrow' if row_count % 2 == 0 else 'oddrow'
-                    tree.insert("", tk.END, values=(plate, owner, date_val, status_key, sheet_name), tags=(status_key, stripe_tag))
+                    tree.insert("", tk.END, values=(office, plate, engine, chassis, brand, year, date_val, cost, acq_date, owner, phys_status, alert_val, sheet_name, sheet_name), tags=(status_key, stripe_tag))
                     row_count += 1
                     has_alerts = True
                     
@@ -375,45 +434,74 @@ class AlertWindow(tk.Tk):
                     item_id = tree.identify_row(event.y)
                     if item_id:
                         values = tree.item(item_id, 'values')
-                        if len(values) >= 5: # Get the sheet name from the hidden column
-                            sheet_to_open = values[4]
+                        if len(values) >= 14: # Get the sheet name from the hidden column
+                            sheet_to_open = values[13]
                             last_click_time[0] = current_time
                             def open_excel_threaded():
                                 try:
-                                    # Use COM to open the file and select the specific sheet
-                                    excel = win32com.client.DispatchEx("Excel.Application")
-                                    excel.Visible = True
-                                    abs_path = os.path.abspath(EXCEL_FILE)
-                                    # Check if already open
-                                    wb = None
-                                    for w in excel.Workbooks:
-                                        if w.FullName == abs_path:
-                                            wb = w
-                                            break
-                                    if not wb:
-                                        wb = excel.Workbooks.Open(abs_path)
+                                    import win32com.client
+                                    import pythoncom
+                                    pythoncom.CoInitialize() # required for threads
                                     
-                                    # Try to activate the specific sheet
+                                    abs_path = os.path.abspath(EXCEL_FILE)
+                                    excel = None
+                                    wb = None
+                                    
+                                    # Try to link to an already open instance of Excel First
                                     try:
-                                        if sheet_to_open and sheet_to_open != "Unknown" and sheet_to_open in [sh.Name for sh in wb.Sheets]:
-                                            wb.Sheets(sheet_to_open).Activate()
-                                    except Exception as e:
-                                        print(f"Failed to activate sheet {sheet_to_open}: {e}")
-                                            
-                                    # Bring window to front
-                                    try:
-                                        import win32gui
-                                        import win32con
-                                        hwnd = excel.Hwnd
-                                        if hwnd:
-                                            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
-                                            win32gui.SetForegroundWindow(hwnd)
+                                        excel = win32com.client.GetActiveObject("Excel.Application")
+                                        for w in excel.Workbooks:
+                                            if w.FullName.lower() == abs_path.lower():
+                                                wb = w
+                                                break
                                     except:
                                         pass
-
+                                        
+                                    if not wb:
+                                        # It's not open. Open it normally so it registers with Windows properly.
+                                        os.startfile(abs_path)
+                                        # Give it a moment to load so COM can grab it
+                                        time.sleep(2.5) 
+                                        try:
+                                            excel = win32com.client.GetActiveObject("Excel.Application")
+                                            for w in excel.Workbooks:
+                                                if w.FullName.lower() == abs_path.lower():
+                                                    wb = w
+                                                    break
+                                        except:
+                                            pass
+                                            
+                                    if wb:
+                                        try:
+                                            # Found the workbook, jump to the exact sheet!
+                                            if sheet_to_open and sheet_to_open != "Unknown":
+                                                for sh in wb.Sheets:
+                                                    if sh.Name == sheet_to_open:
+                                                        sh.Activate()
+                                                        break
+                                        except Exception as e:
+                                            print(f"Failed to activate sheet {sheet_to_open}: {e}")
+                                            
+                                        # Force Excel to the front
+                                        try:
+                                            excel.Visible = True
+                                            import win32gui
+                                            import win32con
+                                            hwnd = excel.Hwnd
+                                            if hwnd:
+                                                if win32gui.IsIconic(hwnd):
+                                                    win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                                                win32gui.SetForegroundWindow(hwnd)
+                                        except Exception as e:
+                                            print(f"Failed to bring to front: {e}")
+                                            
+                                    pythoncom.CoUninitialize()
                                 except Exception as e:
-                                    print(f"Failed to open file via COM: {e}. Falling back to native open.")
-                                    os.startfile(EXCEL_FILE)
+                                    print(f"Major COM failure: {e}")
+                                    try:
+                                        os.startfile(os.path.abspath(EXCEL_FILE))
+                                    except:
+                                        pass
                                     
                             threading.Thread(target=open_excel_threaded, daemon=True).start()
                         
@@ -450,17 +538,12 @@ class AlertWindow(tk.Tk):
             tree.bind("<Motion>", on_tree_motion)
             tree.bind("<Leave>", on_tree_leave)
             
-            tree.pack(side="left", fill="both", expand=True)
+            h_scrollbar.pack(side="bottom", fill="x")
             scrollbar.pack(side="right", fill="y")
+            tree.pack(side="left", fill="both", expand=True)
         else:
              lbl = tk.Label(summary_frame, text="All vehicles are up to date.", font=("Segoe UI", 10), bg=panel_bg, fg='#66cc66' if actual_theme == 'Dark' else '#2e7d32')
              lbl.pack(pady=20)
-        
-        self.status_lbl = tk.Label(self.main_container, text="", bg=bg_color, font=("Segoe UI", 9, "italic"), fg=sub_fg)
-        self.status_lbl.pack(pady=(5, 5))
-
-        btn_frame = tk.Frame(self.main_container, bg=bg_color)
-        btn_frame.pack(fill=tk.X, padx=20, pady=(0, 15))
         
         # Stylization for ttk buttons
         style = ttk.Style()
@@ -540,7 +623,7 @@ def send_notification(detailed_alerts, title="⚠ Vehicle Update Detected", is_a
         return
     gui_queue.put({'type': 'show', 'alerts': detailed_alerts, 'title': title, 'is_auto': is_auto})
 
-def format_plate_with_date(plate, exp_date, sheet_name="Unknown", owner="Unknown"):
+def format_plate_with_data(plate, exp_date, sheet_name="Unknown", owner="Unknown", office="", engine="", chassis="", brand="", year="", cost="", acq_date="", phys_status="", alert=""):
     if pd.isna(exp_date) or str(exp_date).strip() == '':
         dt_str = "N/A"
     else:
@@ -552,7 +635,21 @@ def format_plate_with_date(plate, exp_date, sheet_name="Unknown", owner="Unknown
         except:
             dt_str = str(exp_date)
             
-    return f"{plate}||{owner}||{dt_str}||{sheet_name}"
+    return json.dumps({
+        "plate": plate,
+        "owner": owner,
+        "date": dt_str,
+        "sheet": sheet_name,
+        "office": office,
+        "engine": engine,
+        "chassis": chassis,
+        "brand": brand,
+        "year": year,
+        "cost": cost,
+        "acq_date": acq_date,
+        "status": phys_status,
+        "alert": alert
+    })
 
 def find_header_row(excel_file_obj, sheet_name):
     """
@@ -624,17 +721,36 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
         plate_col_candidates = [c for c in df_sheet.columns if 'PLATE' in str(c).upper()]
         plate_col = plate_col_candidates[0] if plate_col_candidates else 'PLATE #'
         
-        owner_col_candidates = [c for c in df_sheet.columns if 'NAME' in str(c).upper() or 'OWNER' in str(c).upper() or 'CUSTOMER' in str(c).upper()]
+        owner_col_candidates = [c for c in df_sheet.columns if 'NAME' in str(c).upper() or 'OWNER' in str(c).upper() or 'CUSTOMER' in str(c).upper() or 'ACCOUNTABLE' in str(c).upper() or 'PERSON' in str(c).upper()]
         owner_col = owner_col_candidates[0] if owner_col_candidates else None
         
-        exp_col_candidates = [c for c in df_sheet.columns if 'REMINDER' in str(c).upper() or 'DATE' in str(c).upper()]
+        exp_col_candidates = [c for c in df_sheet.columns if 'REMINDER' in str(c).upper() or 'EXPIRATION' in str(c).upper() or 'EXPIRY' in str(c).upper() or ('DATE' in str(c).upper() and 'ACQUISITION' not in str(c).upper())]
         exp_col = exp_col_candidates[0] if exp_col_candidates else 'REMINDER'
         
         status_col_keys = [c for c in df_sheet.columns if 'REGISTERED' in str(c).upper()]
         status_col = status_col_keys[0] if status_col_keys else None
         
+        phys_status_keys = [c for c in df_sheet.columns if 'STATUS' in str(c).upper() and 'NOT' not in str(c).upper()]
+        phys_status_col = phys_status_keys[0] if phys_status_keys else None
+        
         alert_col_candidates = [c for c in df_sheet.columns if 'ALERT' in str(c).upper() and 'SYSTEM' not in str(c).upper()]
         alert_col = alert_col_candidates[0] if alert_col_candidates else None
+
+        office_c = [c for c in df_sheet.columns if 'OFFICE' in str(c).upper()]
+        engine_c = [c for c in df_sheet.columns if 'ENGINE' in str(c).upper()]
+        chassis_c = [c for c in df_sheet.columns if 'CHASSIS' in str(c).upper()]
+        brand_c = [c for c in df_sheet.columns if 'BRAND' in str(c).upper() or 'BODY TYPE' in str(c).upper()]
+        year_c = [c for c in df_sheet.columns if 'YEAR' in str(c).upper()]
+        cost_c = [c for c in df_sheet.columns if 'COST' in str(c).upper()]
+        acq_date_c = [c for c in df_sheet.columns if 'ACQUISITION DATE' in str(c).upper()]
+        
+        office_col = office_c[0] if office_c else None
+        engine_col = engine_c[0] if engine_c else None
+        chassis_col = chassis_c[0] if chassis_c else None
+        brand_col = brand_c[0] if brand_c else None
+        year_col = year_c[0] if year_c else None
+        cost_col = cost_c[0] if cost_c else None
+        acq_date_col = acq_date_c[0] if acq_date_c else None
 
         if plate_col not in df_sheet.columns:
             continue
@@ -645,6 +761,25 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
         for index, row in df_sheet.iterrows():
             plate = row[plate_col]
             owner = str(row[owner_col]).strip() if owner_col and pd.notna(row[owner_col]) else "Unknown"
+            
+            val_office = str(row[office_col]).strip() if office_col and pd.notna(row[office_col]) else ""
+            val_engine = str(row[engine_col]).strip() if engine_col and pd.notna(row[engine_col]) else ""
+            val_chassis = str(row[chassis_col]).strip() if chassis_col and pd.notna(row[chassis_col]) else ""
+            val_brand = str(row[brand_col]).strip() if brand_col and pd.notna(row[brand_col]) else ""
+            val_year = str(row[year_col]).strip() if year_col and pd.notna(row[year_col]) else ""
+            if val_year and val_year.endswith(".0"): val_year = val_year[:-2]
+            val_cost = str(row[cost_col]).strip() if cost_col and pd.notna(row[cost_col]) else ""
+            
+            acq_d = row[acq_date_col] if acq_date_col and pd.notna(row[acq_date_col]) else ""
+            val_acq_date = ""
+            if acq_d != "":
+                try:
+                    if hasattr(acq_d, 'strftime'): val_acq_date = acq_d.strftime('%Y-%m-%d')
+                    else: val_acq_date = str(acq_d).split(" ")[0]
+                except:
+                   val_acq_date = str(acq_d)
+                   
+            val_phys_status = str(row[phys_status_col]).strip() if phys_status_col and pd.notna(row[phys_status_col]) else ""
             
             if pd.isna(plate) or str(plate).strip() == '' or str(plate).upper() == 'CRITERIA':
                 # Avoid breaking fully if there is just an empty row, unless it explicitly says CRITERIA
@@ -661,11 +796,13 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                 val = str(row[alert_col]).strip().upper()
                 if 'EXPIRED' in val or 'LESS THAN' in val:
                     status = 'EXPIRED (RED)'
-                elif '1 TO 14' in val or '1-14' in val or ('EXPIRY' in val and 'BEFORE' in val):
-                    status = 'DAYS BEFORE EXPIRY (ORANGE)'
-                elif '15 TO 29' in val or '15-29' in val or '2 WEEK' in val or '2-WEEK' in val:
-                    status = 'DAYS BEFORE 2 WEEK NOTICE (YELLOW)'
-                elif 'SUFFICIENT' in val or '30 DAYS' in val or 'MORE' in val:
+                elif '1 WEEK' in val or '1-WEEK' in val or ('WEEK' in val and '1' in val) or '1 TO 7' in val or '1-7' in val:
+                    status = '1 WEEK BEFORE EXPIRY (RED)'
+                elif '1 MONTH' in val or '1-MONTH' in val or 'WEEK' in val or '8 TO 30' in val or '8-30' in val or '30 DAYS' in val:
+                    status = '1 MONTH BEFORE EXPIRY (ORANGE)'
+                elif '2 MONTH' in val or '2-MONTH' in val or '60 DAYS' in val or '31 TO 60' in val or '31-60' in val:
+                    status = '2 MONTHS BEFORE EXPIRY (YELLOW)'
+                elif 'SUFFICIENT' in val or 'MORE' in val:
                     status = 'SUFFICIENT TIME (GREEN)'
                 elif 'INPUT' in val:
                     status = 'PLEASE INPUT LAST REG (GRAY)'
@@ -681,20 +818,14 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                         status_override = 'REGISTERED'
                 status = get_expiration_status(exp_date, status_override)
                 
-            current_state[plate] = (status, exp_date, sheet_name, owner)
+            current_state[plate] = (status, exp_date, sheet_name, owner, val_office, val_engine, val_chassis, val_brand, val_year, val_cost, val_acq_date, val_phys_status)
             
             if not first_run or manual_sheet_target is not None:
                 old_state = previous_state.get(plate, None)
                 if old_state is not None:
-                    if len(old_state) == 4:
-                        old_status, old_exp, old_sheet, old_owner = old_state
-                    elif len(old_state) == 3:
-                        old_status, old_exp, old_sheet = old_state
-                        old_owner = "Unknown"
-                    else:
-                        old_status, old_exp = old_state
-                        old_sheet = "Unknown"
-                        old_owner = "Unknown"
+                    old_status = old_state[0]
+                    old_exp = old_state[1] if len(old_state) > 1 else None
+                    old_sheet = old_state[2] if len(old_state) > 2 else "Unknown"
                         
                     if old_status != status or old_exp != exp_date or old_sheet != sheet_name:
                         changed_records.append({
@@ -734,10 +865,19 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
         initial_alerts = {}
         for plate, state_tuple in combined_current_state.items():
             status, exp_date, sheet_name = state_tuple[0], state_tuple[1], state_tuple[2]
+            owner = state_tuple[3] if len(state_tuple) > 3 else "Unknown"
+            office = state_tuple[4] if len(state_tuple) > 4 else ""
+            engine = state_tuple[5] if len(state_tuple) > 5 else ""
+            chassis = state_tuple[6] if len(state_tuple) > 6 else ""
+            brand = state_tuple[7] if len(state_tuple) > 7 else ""
+            year = state_tuple[8] if len(state_tuple) > 8 else ""
+            cost = state_tuple[9] if len(state_tuple) > 9 else ""
+            acq_date = state_tuple[10] if len(state_tuple) > 10 else ""
+            phys_status = state_tuple[11] if len(state_tuple) > 11 else ""
             print_status(f"[{plate}] {status}", status)
             if status not in initial_alerts:
                 initial_alerts[status] = []
-            initial_alerts[status].append(format_plate_with_date(plate, exp_date, sheet_name))
+            initial_alerts[status].append(format_plate_with_data(plate, exp_date, sheet_name, owner, office, engine, chassis, brand, year, cost, acq_date, phys_status, status))
         
         print(f"{Fore.CYAN}--- End Initial Scan ---{Style.RESET_ALL}")
         
@@ -755,10 +895,19 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
              manual_alerts = {}
              # Just pull from the results of what we read!
              for plate, state_tuple in combined_current_state.items():
-                 status, exp_date, sheet_name, owner = state_tuple[0], state_tuple[1], state_tuple[2], state_tuple[3] if len(state_tuple) > 3 else "Unknown"
+                 status, exp_date, sheet_name = state_tuple[0], state_tuple[1], state_tuple[2]
+                 owner = state_tuple[3] if len(state_tuple) > 3 else "Unknown"
+                 office = state_tuple[4] if len(state_tuple) > 4 else ""
+                 engine = state_tuple[5] if len(state_tuple) > 5 else ""
+                 chassis = state_tuple[6] if len(state_tuple) > 6 else ""
+                 brand = state_tuple[7] if len(state_tuple) > 7 else ""
+                 year = state_tuple[8] if len(state_tuple) > 8 else ""
+                 cost = state_tuple[9] if len(state_tuple) > 9 else ""
+                 acq_date = state_tuple[10] if len(state_tuple) > 10 else ""
+                 phys_status = state_tuple[11] if len(state_tuple) > 11 else ""
                  if status not in manual_alerts:
                      manual_alerts[status] = []
-                 manual_alerts[status].append(format_plate_with_date(plate, exp_date, sheet_name, owner))
+                 manual_alerts[status].append(format_plate_with_data(plate, exp_date, sheet_name, owner, office, engine, chassis, brand, year, cost, acq_date, phys_status, status))
              
              if manual_alerts:
                  send_notification(manual_alerts, title=title_text, is_auto=False)
@@ -782,10 +931,19 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
              # Send comprehensive updated state so UI refreshes real-time
              full_alerts = {}
              for plate, state_tuple in combined_current_state.items():
-                 status, exp_date, sheet_name, owner = state_tuple[0], state_tuple[1], state_tuple[2], state_tuple[3] if len(state_tuple) > 3 else "Unknown"
+                 status, exp_date, sheet_name = state_tuple[0], state_tuple[1], state_tuple[2]
+                 owner = state_tuple[3] if len(state_tuple) > 3 else "Unknown"
+                 office = state_tuple[4] if len(state_tuple) > 4 else ""
+                 engine = state_tuple[5] if len(state_tuple) > 5 else ""
+                 chassis = state_tuple[6] if len(state_tuple) > 6 else ""
+                 brand = state_tuple[7] if len(state_tuple) > 7 else ""
+                 year = state_tuple[8] if len(state_tuple) > 8 else ""
+                 cost = state_tuple[9] if len(state_tuple) > 9 else ""
+                 acq_date = state_tuple[10] if len(state_tuple) > 10 else ""
+                 phys_status = state_tuple[11] if len(state_tuple) > 11 else ""
                  if status not in full_alerts:
                      full_alerts[status] = []
-                 full_alerts[status].append(format_plate_with_date(plate, exp_date, sheet_name, owner))
+                 full_alerts[status].append(format_plate_with_data(plate, exp_date, sheet_name, owner, office, engine, chassis, brand, year, cost, acq_date, phys_status, status))
                      
              if full_alerts:
                  send_notification(full_alerts, title=f"⚠ Real-time File Update: {sheet_title_str}", is_auto=True)
