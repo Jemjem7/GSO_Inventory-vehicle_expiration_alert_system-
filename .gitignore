@@ -23,6 +23,10 @@ VehicleMonitoring.xlsx
 vehicle_monitoring_mock.xlsx
 app_icon.ico
 ~$*.xlsx
+backup_excel_files/
+Vehicle Alert System/
+*.ps1
+
 
 # OS generated
 .DS_Store
