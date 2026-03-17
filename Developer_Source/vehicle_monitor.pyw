@@ -229,7 +229,7 @@ def get_expiration_status(exp_date, status_override):
             target_date = exp_date.date()
         else:
             exp_date_str = str(exp_date).replace("\\", "/")
-            target_date = pd.to_datetime(exp_date_str, dayfirst=True).date()
+            target_date = pd.to_datetime(exp_date_str, dayfirst=False).date()
 
         today = datetime.now().date()
         delta_days = (target_date - today).days
@@ -432,9 +432,20 @@ class AlertWindow(QMainWindow):
             ("REGISTERED", "REGISTERED", "REGISTERED"),
         ]
 
-        for disp_name, parse_name, _ in self.stat_categories:
+        for disp_name, parse_name, short_key in self.stat_categories:
             group = QWidget()
             group.setMinimumHeight(65)
+            
+            cat_map = {
+                "EXPIRED": "expired",
+                "DAYS BEFORE EXPIRY": "days_before_expiry",
+                "2 WEEK NOTICE": "notice_2week",
+                "SUFFICIENT TIME": "sufficient_time",
+                "PLEASE INPUT LAST REG": "input_reg",
+                "REGISTERED": "registered"
+            }
+            group.setProperty("stat_cat", cat_map.get(short_key, "unknown"))
+
             glay = QVBoxLayout(group)
             glay.setContentsMargins(0, 4, 0, 4)
 
@@ -602,7 +613,6 @@ class AlertWindow(QMainWindow):
         self.apply_stylesheet()
         self.setWindowFlags(
             self.windowFlags()
-            | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.WindowMinimizeButtonHint
             | Qt.WindowType.WindowMaximizeButtonHint
         )
@@ -670,21 +680,22 @@ class AlertWindow(QMainWindow):
                         
                         self.raise_()
                         self.activateWindow()
-                    else:
-                        # If already visible and not minimized, just stay on the current page.
-                        # build_ui already refreshed the data and month pills.
-                        # If we are on the table page, populate_table was called by build_ui
-                        # using the last used filters.
-                        pass
+                elif msg["type"] == "show_request":
+                    self.showNormal()
+                    self.raise_()
+                    self.activateWindow()
                 elif msg["type"] == "log":
                     from PyQt6.QtWidgets import QListWidgetItem
                     itm = QListWidgetItem(f"[{datetime.now().strftime('%I:%M:%S %p')}] {msg['message']}")
                     colors = {
                         "EXPIRED": "#EF5350",
-                        "DAYS BEFORE EXPIRY": "#FFA726",
+                        "DAYS BEFORE EXPIRY": "#FF8C00",
                         "2 WEEK NOTICE": "#FFEE58",
                         "SUFFICIENT TIME": "#66BB6A",
+                        "PLEASE INPUT LAST REG": "#9E9E9E",
+                        "REGISTERED": "#4FC3F7",
                     }
+
                     if msg.get("status") in colors:
                         itm.setForeground(QColor(colors[msg["status"]]))
                     self.log_list.insertItem(0, itm)
@@ -937,6 +948,13 @@ class AlertWindow(QMainWindow):
                 color: {t_cfg['stat_fg']};
             }}
 
+            QWidget[stat_cat="expired"]:hover QLabel {{ color: #DC3545; }}
+            QWidget[stat_cat="days_before_expiry"]:hover QLabel {{ color: #FD7E14; }}
+            QWidget[stat_cat="notice_2week"]:hover QLabel {{ color: #FFC107; }}
+            QWidget[stat_cat="sufficient_time"]:hover QLabel {{ color: #28A745; }}
+            QWidget[stat_cat="input_reg"]:hover QLabel {{ color: #AAAAAA; }}
+            QWidget[stat_cat="registered"]:hover QLabel {{ color: #007BFF; }}
+
             /* Table Styling */
             QTableWidget {{
                 background-color: {t_panel};
@@ -1068,7 +1086,7 @@ class AlertWindow(QMainWindow):
         if actual_theme == "Dark":
             colors_map = {
                 "EXPIRED": "#EF5350",
-                "DAYS BEFORE EXPIRY": "#FFA726",
+                "DAYS BEFORE EXPIRY": "#FF8C00",
                 "DAYS BEFORE 2 WEEK NOTICE": "#FFEE58",
                 "SUFFICIENT TIME": "#66BB6A",
                 "PLEASE INPUT LAST REG": "#9E9E9E",
@@ -1262,9 +1280,7 @@ class AlertWindow(QMainWindow):
             target=process_excel, args=(EXCEL_FILE, selection, True), daemon=True
         ).start()
 
-    def on_row_click(self, item):
-        row = item.row()
-        sheet_to_open = self.table.item(row, self.table.columnCount() - 1).text()
+    def open_excel_at_sheet(self, sheet_to_open):
         current_time = time.time()
         if (
             hasattr(self, "last_click_time")
@@ -1292,20 +1308,24 @@ class AlertWindow(QMainWindow):
                     pass
                 if not wb:
                     os.startfile(abs_path)
-                    time.sleep(2.5)
-                    try:
-                        excel = win32com.client.GetActiveObject("Excel.Application")
-                        for w in excel.Workbooks:
-                            if w.FullName.lower() == abs_path.lower():
-                                wb = w
+                    for _ in range(12):  # Wait up to 6s
+                        time.sleep(0.5)
+                        try:
+                            excel = win32com.client.GetActiveObject("Excel.Application")
+                            for w in excel.Workbooks:
+                                if w.FullName.lower() == abs_path.lower():
+                                    wb = w
+                                    break
+                            if wb:
                                 break
-                    except:
-                        pass
+                        except:
+                            pass
                 if wb:
                     try:
                         if sheet_to_open and sheet_to_open != "Unknown":
+                            print(f"Attempting to activate Excel sheet: '{sheet_to_open}'")
                             for sh in wb.Sheets:
-                                if sh.Name == sheet_to_open:
+                                if str(sh.Name).strip().upper() == str(sheet_to_open).strip().upper():
                                     sh.Activate()
                                     break
                     except:
@@ -1330,6 +1350,11 @@ class AlertWindow(QMainWindow):
                     pass
 
         threading.Thread(target=open_excel_threaded, daemon=True).start()
+
+    def on_row_click(self, item):
+        row = item.row()
+        sheet_to_open = self.table.item(row, self.table.columnCount() - 1).text()
+        self.open_excel_at_sheet(sheet_to_open)
 
 
 def send_notification(
@@ -1403,7 +1428,7 @@ def format_plate_with_data(
         try:
             if not hasattr(exp_date, "strftime"):
                 exp_date_str = str(exp_date).replace("\\", "/")
-                exp_date = pd.to_datetime(exp_date_str, dayfirst=True)
+                exp_date = pd.to_datetime(exp_date_str, dayfirst=False)
             dt_str = exp_date.strftime("%Y-%m-%d")
         except:
             dt_str = str(exp_date)
@@ -2008,18 +2033,13 @@ def background_monitor():
                 tracked_mtimes = {}
                 last_checked_date = current_date
 
-            xlsx_files = [
-                f
-                for f in os.listdir(".")
-                if f.endswith(".xlsx") and not f.startswith("~")
-            ]
-            for f in xlsx_files:
-                current_mtime = os.path.getmtime(f)
-                if tracked_mtimes.get(f) != current_mtime:
+            if os.path.exists(EXCEL_FILE):
+                current_mtime = os.path.getmtime(EXCEL_FILE)
+                if tracked_mtimes.get(EXCEL_FILE) != current_mtime:
                     time.sleep(2)
-                    process_excel(f)
+                    process_excel(EXCEL_FILE)
                     try:
-                        tracked_mtimes[f] = os.path.getmtime(f)
+                        tracked_mtimes[EXCEL_FILE] = os.path.getmtime(EXCEL_FILE)
                     except WindowsError:
                         pass
             time.sleep(CHECK_INTERVAL_SECONDS)
@@ -2086,6 +2106,22 @@ def pystray_runner():
 
 
 def main():
+    # Force working directory to the script's directory for safety
+    if hasattr(sys, 'frozen'):
+        app_dir = os.path.dirname(sys.executable)
+    else:
+        app_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(app_dir)
+
+    # Smart Detect Excel Name
+    if not os.path.exists(EXCEL_FILE):
+        xlsx_files = [f for f in os.listdir(".") if f.lower().endswith(".xlsx") and not f.startswith("~")]
+        if len(xlsx_files) == 1:
+            try:
+                os.rename(xlsx_files[0], EXCEL_FILE)
+            except Exception as e:
+                pass
+
     # --- Single Instance Lock ---
     global lock_socket
     lock_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -2098,7 +2134,10 @@ def main():
                     lock_socket.settimeout(1.0)
                     data, _ = lock_socket.recvfrom(1024)
                     if data == b"trigger":
-                        print("Received trigger from another instance!")
+                        with open("startup_log.txt", "a") as f:
+                            f.write("Received trigger at " + datetime.now().strftime("%Y-%m-%d %H:%M:%S") + "\n")
+                        # Request UI to show window
+                        gui_queue.put({"type": "show_request"})
                         threading.Thread(
                             target=process_excel,
                             args=(EXCEL_FILE,),

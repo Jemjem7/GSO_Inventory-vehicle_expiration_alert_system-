@@ -1,0 +1,33 @@
+# Build outputs
+dist/
+build/
+*.spec
+*.exe
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+venv/
+env/
+.venv/
+.env/
+
+# IDEs
+.idea/
+.vscode/
+
+# Project specific
+VehicleMonitoring.xlsx
+vehicle_monitoring_mock.xlsx
+app_icon.ico
+~$*.xlsx
+backup_excel_files/
+Vehicle Alert System/
+*.ps1
+
+
+# OS generated
+.DS_Store
+Thumbs.db

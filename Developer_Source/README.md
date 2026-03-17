@@ -1,6 +1,6 @@
 # Real-Time Excel Vehicle Expiration Notification System
 
-This system monitors an Excel file (`VehicleMonitoring1.xlsx`) for vehicle plate expirations and gives real-time Windows popup notifications based on status changes.
+This system monitors an Excel file (`VehicleMonitoring.xlsx`) for vehicle plate expirations and gives real-time Windows popup notifications based on status changes.
 
 ## Prerequisites
 1. **Python 3.8+** must be installed on your Windows system.

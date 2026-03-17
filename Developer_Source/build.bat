@@ -6,7 +6,8 @@ py -m pip install pystray colorama pandas openpyxl pillow
 py -m pip install pyinstaller
 
 echo Running PyInstaller...
-py -m PyInstaller --noconfirm --onedir --windowed --icon "app_icon.ico" "vehicle_monitor.py"
+py -m PyInstaller --noconfirm --onedir --windowed --icon "app_icon.ico" "vehicle_monitor.pyw"
+
 
 echo.
 echo Build Complete!
