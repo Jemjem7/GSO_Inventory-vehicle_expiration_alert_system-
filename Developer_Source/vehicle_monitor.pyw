@@ -42,6 +42,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
     QFrame,
+    QGraphicsDropShadowEffect,
     QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
@@ -57,6 +58,28 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+class SafeStream:
+    def __init__(self, original_stream):
+        self._original = original_stream
+
+    def write(self, s):
+        try:
+            if self._original:
+                self._original.write(s)
+        except Exception:
+            pass
+
+    def flush(self):
+        try:
+            if self._original:
+                self._original.flush()
+        except Exception:
+            pass
+
+
+sys.stdout = SafeStream(sys.stdout)
+sys.stderr = SafeStream(sys.stderr)
 
 colorama.init(autoreset=True)
 
@@ -279,6 +302,15 @@ class ClickableLabel(QLabel):
         super().mouseReleaseEvent(event)
 
 
+class MonthButton(QPushButton):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("MonthPill")
+        self.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.setMinimumHeight(45)
+
+
+
 
 class AlertWindow(QMainWindow):
 
@@ -448,11 +480,9 @@ class AlertWindow(QMainWindow):
 
             glay = QVBoxLayout(group)
             glay.setContentsMargins(0, 4, 0, 4)
-
             glay.setSpacing(8)
 
-
-            num_lbl = ClickableLabel("00")
+            num_lbl = ClickableLabel("--")
             num_lbl.setObjectName("StatNum")
             num_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             num_lbl.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -554,7 +584,7 @@ class AlertWindow(QMainWindow):
         self.back_btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.back_btn.clicked.connect(lambda: self.animate_to_page(0))
 
-        self.table_title_lbl = QLabel("DETAIL VIEW")
+        self.table_title_lbl = QLabel("LOADING EXCEL DATA... PLEASE WAIT")
         self.table_title_lbl.setObjectName("TableTitle")
 
         from PyQt6.QtWidgets import QLineEdit
@@ -611,12 +641,28 @@ class AlertWindow(QMainWindow):
         self.queue_timer.start(200)
 
         self.apply_stylesheet()
+        
+        self.table_title_lbl.setText("LOADING EXCEL DATA... PLEASE WAIT...")
+        
         self.setWindowFlags(
             self.windowFlags()
             | Qt.WindowType.WindowMinimizeButtonHint
             | Qt.WindowType.WindowMaximizeButtonHint
         )
-        self.hide()
+        self.showNormal()
+        QTimer.singleShot(100, self.do_initial_startup)
+
+    def do_initial_startup(self):
+        try:
+            backup_excel(EXCEL_FILE)
+            process_excel(EXCEL_FILE)
+        except Exception as e:
+            print(e)
+        self.table_title_lbl.setText("DETAIL VIEW")
+        
+        monitor_thread = threading.Thread(target=background_monitor, daemon=True)
+        monitor_thread.start()
+
 
     def toggle_logs(self):
         if self.log_list.isVisible():
@@ -915,7 +961,7 @@ class AlertWindow(QMainWindow):
                 font-weight: 800;
                 color: {t_cfg['header_fg']};
             }}
-            QPushButton.MonthPill {{
+            QPushButton#MonthPill {{
                 background-color: {t_cfg['pill_bg']};
                 border-radius: 6px;
                 padding: 12px 20px;
@@ -926,11 +972,11 @@ class AlertWindow(QMainWindow):
                 min-width: 140px;
                 border: 2px solid transparent; /* default */
             }}
-            QPushButton.MonthPill:hover {{
+            QPushButton#MonthPill:hover {{
                 background-color: {t_cfg['pill_hover']};
                 border: 2px solid #1A1A1A;
             }}
-            QPushButton.MonthPill[has_current="true"] {{
+            QPushButton#MonthPill[has_current="true"] {{
                 border-bottom: 2px solid #1A1A1A; /* Imitating the black line under active in mockup? */
             }}
 
@@ -1067,10 +1113,7 @@ class AlertWindow(QMainWindow):
         if current_sheets:
             sorted_sheets = sort_sheets_chronologically(current_sheets)
             for sh in sorted_sheets:
-                btn = QPushButton(str(sh).upper())
-                btn.setProperty("class", "MonthPill")
-                btn.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-                # Add shadow style text effect directly
+                btn = MonthButton(str(sh).upper())
                 btn.clicked.connect(
                     (lambda s=sh: lambda: self.show_table_view(filter_sheet=s))()
                 )
@@ -1079,6 +1122,9 @@ class AlertWindow(QMainWindow):
 
         # Update table using current filters to preserve view
         self.populate_table(detailed_alerts, self.current_filter_status, self.current_filter_sheet)
+        self.table_title_lbl.setText("DETAIL VIEW" if not self.current_filter_sheet else f"DETAIL VIEW : {self.current_filter_sheet}")
+        self.scan_all_btn.setText("SCAN\nALL")
+        self.scan_all_btn.setEnabled(True)
 
     def populate_table(self, detailed_alerts, filter_status=None, filter_sheet=None):
         colors_map = {}
@@ -1262,6 +1308,21 @@ class AlertWindow(QMainWindow):
         self.scan_all_btn.setEnabled(False)
         self.table_title_lbl.setText("Scanning all sheets in background...")
         
+        # Clear UI for visual refresh
+        self.table.clearContents()
+        self.table.setRowCount(0)
+        while self.month_list_layout.count():
+            item = self.month_list_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+                
+        for disp, parse, _ in self.stat_categories:
+            if parse in self.stat_labels:
+                self.stat_labels[parse].setText("00")
+                
+        global previous_state
+        previous_state.clear()
+        
         def run_scan():
             try:
                 process_excel(EXCEL_FILE, None, True)
@@ -1276,6 +1337,10 @@ class AlertWindow(QMainWindow):
         global current_viewed_sheet
         current_viewed_sheet = selection
         self.table_title_lbl.setText(f"Scanning {selection} in background...")
+        
+        global previous_state
+        previous_state.clear()
+        
         threading.Thread(
             target=process_excel, args=(EXCEL_FILE, selection, True), daemon=True
         ).start()
@@ -2161,16 +2226,6 @@ def main():
     # --- End Single Instance Lock ---
 
     print(f"{Fore.GREEN}Starting Vehicle Monitor Dashboard...{Style.RESET_ALL}")
-
-    # Safety Backup on Launch
-    backup_excel(EXCEL_FILE)
-
-    # Pre-scan the initial file so tray menu builds immediately
-    process_excel(EXCEL_FILE)
-
-
-    monitor_thread = threading.Thread(target=background_monitor, daemon=True)
-    monitor_thread.start()
 
     tray_thread = threading.Thread(target=pystray_runner, daemon=True)
     tray_thread.start()
