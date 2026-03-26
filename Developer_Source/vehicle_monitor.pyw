@@ -84,7 +84,7 @@ sys.stderr = SafeStream(sys.stderr)
 colorama.init(autoreset=True)
 
 # Configuration
-EXCEL_FILE = "VehicleMonitoring.xlsx"
+EXCEL_FILE = "../GSO_ALERT/VehicleMonitoring.xlsx"
 CHECK_INTERVAL_SECONDS = 5
 
 
@@ -412,6 +412,20 @@ class AlertWindow(QMainWindow):
         self.month_scroll.setWidgetResizable(True)
         self.month_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.month_scroll.setStyleSheet("background: transparent; border: none;")
+        
+        # New Unit Frame (Separated from scroll)
+        self.new_unit_container = QFrame()
+        self.new_unit_container.setObjectName("NewUnitContainer")
+        self.new_unit_container_layout = QVBoxLayout(self.new_unit_container)
+        self.new_unit_container_layout.setContentsMargins(50, 0, 50, 10)
+        self.btn_new_unit = MonthButton("NEW UNIT")
+        # Distinct style
+        self.btn_new_unit.setStyleSheet("background-color: #4A90E2; color: #FFFFFF; border: 2px solid #FFFFFF;")
+        self.new_unit_container_layout.addWidget(self.btn_new_unit)
+        self.new_unit_container.hide() # Hidden until scan finds it
+        
+        self.mid_layout.addWidget(self.new_unit_container)
+        
         self.month_scroll_content = QWidget()
         self.month_scroll_content.setStyleSheet("background: transparent;")
         self.month_list_layout = QVBoxLayout(self.month_scroll_content)
@@ -1110,10 +1124,21 @@ class AlertWindow(QMainWindow):
                 item.widget().deleteLater()
 
         global current_sheets
+        self.new_unit_container.hide()
         if current_sheets:
             sorted_sheets = sort_sheets_chronologically(current_sheets)
             for sh in sorted_sheets:
-                btn = MonthButton(str(sh).upper())
+                sh_name = str(sh).upper()
+                if sh_name == "NEW UNIT":
+                    self.new_unit_container.show()
+                    try: self.btn_new_unit.clicked.disconnect()
+                    except: pass
+                    self.btn_new_unit.clicked.connect(
+                        (lambda s=sh: lambda: self.show_table_view(filter_sheet=s))()
+                    )
+                    continue
+                    
+                btn = MonthButton(sh_name)
                 btn.clicked.connect(
                     (lambda s=sh: lambda: self.show_table_view(filter_sheet=s))()
                 )
@@ -1149,28 +1174,33 @@ class AlertWindow(QMainWindow):
             }
 
         columns = [
-            "STATUS (YES/NO)",
-            "OFFICE",
-            "PLATE #",
-            "MAKE",
-            "TYPE",
-            "EMISSION",
-            "GSIS",
-            "LTO",
-            "LAST REG.",
-            "REMINDER",
-            "ALERT",
-            "INSURANCE (₱)",
-            "DRIVER",
-            "ACQ. COST (₱)",
-            "DATE ACQUIRED",
-            "MONTH",
-            "Sheet_Hidden",
+            "PLEASE TYPE \"YES\" if REGISTERED", # Index 0
+            "OFFICE", # 1
+            "PLATE #", # 2
+            "MAKE", # 3
+            "TYPE", # 4
+            "EMISSION", # 5
+            "GSIS", # 6
+            "LTO", # 7
+            "LAST REG.", # 8
+            "REMINDER", # 9
+            "ALERT", # 10
+            "INSURANCE (₱)", # 11
+            "DRIVER", # 12
+            "ACQ. COST (₱)", # 13
+            "DATE ACQUIRED", # 14
+            "MONTH", # 15
+            "STATUS", # 16
+            "Sheet_Hidden", # 17
         ]
         self.table.clear()
         self.table.setColumnCount(len(columns))
         self.table.setHorizontalHeaderLabels(columns)
-        self.table.setColumnHidden(len(columns) - 1, True)
+        self.table.setColumnHidden(len(columns) - 1, True) # Sheet_Hidden
+        
+        # Always show MONTH and STATUS columns
+        self.table.setColumnHidden(15, False) # MONTH
+        self.table.setColumnHidden(16, False) # STATUS
 
         all_rows = []
         importance_order = [
@@ -1222,7 +1252,7 @@ class AlertWindow(QMainWindow):
                         continue
 
                     row_data = [
-                        data.get("status", ""),
+                        data.get("status_val", ""), # PLEASE TYPE "YES" if REGISTERED (Index 0)
                         data.get("office", ""),
                         data.get("plate", "Unknown"),
                         data.get("make", ""),
@@ -1232,13 +1262,14 @@ class AlertWindow(QMainWindow):
                         data.get("lto", ""),
                         data.get("last_reg", ""),
                         data.get("date", "N/A"),
-                        data.get("alert", status_key),
+                        data.get("alert", status_key), # ALERT (Index 10)
                         data.get("insurance", ""),
                         data.get("driver", "Unknown"),
                         data.get("cost", ""),
                         data.get("acq_date", ""),
-                        data.get("sheet", "Unknown"),
-                        data.get("sheet", "Unknown"),
+                        data.get("target_month", data.get("sheet", "Unknown")), # MONTH (Index 15)
+                        data.get("alert", status_key), # STATUS (Index 16)
+                        data.get("sheet", "Unknown"), # Sheet_Hidden (Index 17)
                     ]
                     all_rows.append((row_data, fg_color))
 
@@ -1258,6 +1289,7 @@ class AlertWindow(QMainWindow):
                     "REMINDER",
                     "DATE ACQUIRED",
                     "MONTH",
+                    "STATUS",
                 ]:
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 else:
@@ -1486,6 +1518,8 @@ def format_plate_with_data(
     alert="",
     insurance="",
     driver="",
+    status_val="",
+    target_month="",
 ):
     if pd.isna(exp_date) or str(exp_date).strip() == "":
         dt_str = "N/A"
@@ -1517,6 +1551,8 @@ def format_plate_with_data(
             "acq_date": acq_date,
             "status": phys_status,
             "alert": alert,
+            "status_val": status_val,
+            "target_month": target_month,
         }
     )
 
@@ -1717,11 +1753,18 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
             val_lto = (
                 str(row[lto_col]).strip() if lto_col and pd.notna(row[lto_col]) else ""
             )
-            val_last_reg = (
-                str(row[last_reg_col]).strip()
-                if last_reg_col and pd.notna(row[last_reg_col])
-                else ""
-            )
+            def format_date_only(val):
+                if pd.isna(val) or str(val).strip() == "":
+                    return ""
+                if hasattr(val, "strftime"):
+                    return val.strftime("%Y-%m-%d")
+                s = str(val).strip()
+                if " " in s:
+                    # Strip time if it's 00:00:00 or any time
+                    s = s.split(" ")[0]
+                return s
+
+            val_last_reg = format_date_only(row[last_reg_col])
             val_insurance = (
                 clean_currency(row[insurance_col])
                 if insurance_col and pd.notna(row[insurance_col])
@@ -1738,15 +1781,7 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                 if acq_date_col and pd.notna(row[acq_date_col])
                 else ""
             )
-            val_acq_date = ""
-            if acq_d != "":
-                try:
-                    if hasattr(acq_d, "strftime"):
-                        val_acq_date = acq_d.strftime("%Y-%m-%d")
-                    else:
-                        val_acq_date = str(acq_d).split(" ")[0]
-                except:
-                    val_acq_date = str(acq_d)
+            val_acq_date = format_date_only(acq_d)
 
             val_phys_status = (
                 str(row[phys_status_col]).strip()
@@ -1765,11 +1800,24 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                 continue
 
             plate = str(plate).strip()
-            exp_date = (
-                row[exp_col]
-                if exp_col in df_sheet.columns and pd.notna(row[exp_col])
-                else None
-            )
+            if sheet_name == "NEW UNIT":
+                # Use Acquisition Date + 3 years for countdown
+                try:
+                    if acq_d and hasattr(acq_d, "year"):
+                        exp_date = acq_d.replace(year=acq_d.year + 3)
+                    elif isinstance(acq_d, str) and acq_d.strip():
+                        ad_dt = pd.to_datetime(acq_d)
+                        exp_date = ad_dt.replace(year=ad_dt.year + 3)
+                    else:
+                        exp_date = None
+                except:
+                    exp_date = None
+            else:
+                exp_date = (
+                    row[exp_col]
+                    if exp_col in df_sheet.columns and pd.notna(row[exp_col])
+                    else None
+                )
 
             status = None
             # NATIVE EXCEL ALERT READING
@@ -1801,6 +1849,10 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                         status_override = "REGISTERED"
                 status = get_expiration_status(exp_date, status_override)
 
+            val_target_month = ""
+            if sheet_name == "NEW UNIT" and exp_date:
+                val_target_month = exp_date.strftime("%B %Y").upper()
+
             current_state[plate] = (
                 status,
                 exp_date,
@@ -1818,6 +1870,8 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                 val_acq_date,
                 val_phys_status,
                 val_driver,
+                str(row[status_col]).strip() if status_col and pd.notna(row[status_col]) else "",
+                val_target_month,
             )
 
             if not first_run or manual_sheet_target is not None:
@@ -1984,6 +2038,8 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                         status,
                         insurance,
                         driver,
+                        state_tuple[16] if len(state_tuple) > 16 else "",
+                        state_tuple[17] if len(state_tuple) > 17 else ""
                     )
                 )
 
@@ -2061,6 +2117,8 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                         status,
                         insurance,
                         driver,
+                        state_tuple[16] if len(state_tuple) > 16 else "",
+                        state_tuple[17] if len(state_tuple) > 17 else ""
                     )
                 )
 
@@ -2087,6 +2145,141 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
 tracked_mtimes = {}
 
 
+def handle_new_unit_expiry(filepath):
+    """
+    Checks 'NEW UNIT' sheet for vehicles that have reached 3 years since acquisition.
+    Transfers them to their respective monthly sheets and sorts the target sheet.
+    """
+    import pythoncom
+
+    pythoncom.CoInitialize()
+    try:
+        try:
+            excel = win32com.client.GetActiveObject("Excel.Application")
+        except:
+            excel = win32com.client.Dispatch("Excel.Application")
+
+        abs_path = os.path.abspath(filepath)
+        wb = None
+        for w in excel.Workbooks:
+            if w.FullName.lower() == abs_path.lower():
+                wb = w
+                break
+
+        if not wb:
+            if os.path.exists(abs_path):
+                wb = excel.Workbooks.Open(abs_path)
+            else:
+                return
+
+        try:
+            ws_new = wb.Sheets("NEW UNIT")
+        except:
+            return  # No NEW UNIT sheet
+
+        # Scan for expired units (3 years)
+        # Assuming Date Acquired is in Column P (16)
+        # Header is in Row 4, Data starts Row 6
+        last_row = ws_new.Cells(ws_new.Rows.Count, "P").End(-4162).Row  # xlUp = -4162
+        if last_row < 6:
+            return
+
+        today = datetime.now()
+        rows_to_delete = []
+
+        for r in range(6, last_row + 1):
+            date_val = ws_new.Cells(r, 16).Value
+            if not date_val:
+                continue
+
+            # Standard python datetime or pywintypes.datetime
+            try:
+                if hasattr(date_val, "year"):
+                    d_acquired = datetime(date_val.year, date_val.month, date_val.day)
+                elif isinstance(date_val, str):
+                    d_acquired = datetime.strptime(date_val, "%Y-%m-%d")
+                else:
+                    continue
+            except:
+                continue
+
+            # Calculate 3-year expiry
+            try:
+                expiry_date = d_acquired.replace(year=d_acquired.year + 3)
+            except ValueError:  # Leap year Feb 29 case
+                expiry_date = d_acquired.replace(year=d_acquired.year + 3, day=28)
+
+            if today >= expiry_date:
+                # Time to transfer
+                target_sheet_name = expiry_date.strftime("%B %Y").upper()
+
+                # Find or create target sheet
+                ws_target = None
+                for s in wb.Sheets:
+                    if s.Name == target_sheet_name:
+                        ws_target = s
+                        break
+
+                if not ws_target:
+                    # Create new monthly sheet
+                    ws_target = wb.Sheets.Add(Before=wb.Sheets(1))
+                    ws_target.Name = target_sheet_name
+                    # Copy headers from NEW UNIT
+                    ws_new.Rows("4:5").Copy(Destination=ws_target.Rows("4:5"))
+
+                # Find next empty row in target (based on Plate # in Column C)
+                target_last_row = ws_target.Cells(ws_target.Rows.Count, "C").End(
+                    -4162
+                ).Row  # xlUp
+                if target_last_row < 5:
+                    target_last_row = 5
+                new_row_idx = target_last_row + 1
+
+                # Copy row
+                ws_new.Rows(r).Copy(Destination=ws_target.Rows(new_row_idx))
+                rows_to_delete.append(r)
+
+                # Auto Sort target sheet by Plate # (Column C=3)
+                target_range = ws_target.Range(f"A6:P{new_row_idx}")
+                target_range.Sort(Key1=ws_target.Range("C6"), Order1=1)  # xlAscending=1
+            else:
+                # ITEM NOT EXPIRED: Update its status in Column K (ALERT)
+                # Map colors based on get_expiration_status
+                status_str = get_expiration_status(expiry_date, None)
+                cell_alert = ws_new.Cells(r, 11) # Column K = 11
+                cell_alert.Value = status_str
+                
+                # Apply Colors (Matching Dashboard)
+                color_map = {
+                    "LESS THAN 0 DAYS = EXPIRED": 255,                 # Red
+                    "1 TO 14 DAYS = DAYS BEFORE EXPIRY": 49407,        # Orange
+                    "15 TO 29 DAYS = DAYS BEFORE 2 WEEK NOTICE": 65535, # Yellow
+                    "30 DAYS AND MORE = SUFFICIENT TIME": 5287936,     # Green
+                    "PLEASE INPUT LAST REG": 12632256,                 # Gray
+                    "REGISTERED": 16737843                             # Blue
+                }
+                if status_str in color_map:
+                    cell_alert.Interior.Color = color_map[status_str]
+                    cell_alert.Font.Color = 0 # Black text for visibility
+                    if status_str == "LESS THAN 0 DAYS = EXPIRED":
+                        cell_alert.Font.Color = 16777215 # White text for red
+
+        # Delete rows in reverse to maintain indices
+        for r in sorted(rows_to_delete, reverse=True):
+            ws_new.Rows(r).Delete()
+
+        if rows_to_delete:
+            wb.Save()
+            print(
+                f"Transferred {len(rows_to_delete)} units from NEW UNIT to monthly sheets."
+            )
+
+    except Exception as e:
+        print(f"Error in handle_new_unit_expiry: {e}")
+    finally:
+        pythoncom.CoUninitialize()
+
+
 def background_monitor():
     global monitor_active, tracked_mtimes
     last_checked_date = datetime.now().date()
@@ -2102,6 +2295,7 @@ def background_monitor():
                 current_mtime = os.path.getmtime(EXCEL_FILE)
                 if tracked_mtimes.get(EXCEL_FILE) != current_mtime:
                     time.sleep(2)
+                    handle_new_unit_expiry(EXCEL_FILE)
                     process_excel(EXCEL_FILE)
                     try:
                         tracked_mtimes[EXCEL_FILE] = os.path.getmtime(EXCEL_FILE)
@@ -2156,12 +2350,22 @@ def pystray_runner():
     def setup_menu():
         items = [pystray.MenuItem("Scan Excel", on_scan_all), pystray.Menu.SEPARATOR]
         if current_sheets:
+            # Separate NEW UNIT from months
+            months_only = [s for s in current_sheets if str(s).upper() != "NEW UNIT"]
+            has_new_unit = any(str(s).upper() == "NEW UNIT" for s in current_sheets)
+            
+            if has_new_unit:
+                items.append(pystray.MenuItem("Scan NEW UNIT", make_scan_sheet_callback("NEW UNIT")))
+                items.append(pystray.Menu.SEPARATOR)
+
             sheet_menus = []
-            for sheet in current_sheets:
+            for sheet in months_only:
                 sheet_menus.append(
                     pystray.MenuItem(f"Scan {sheet}", make_scan_sheet_callback(sheet))
                 )
-            items.append(pystray.MenuItem("Scan Month...", pystray.Menu(*sheet_menus)))
+            if sheet_menus:
+                items.append(pystray.MenuItem("Scan Month...", pystray.Menu(*sheet_menus)))
+        
         items.append(pystray.Menu.SEPARATOR)
         items.append(pystray.MenuItem("Exit", on_exit))
         return items
