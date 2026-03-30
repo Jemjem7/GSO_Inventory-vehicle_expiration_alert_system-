@@ -269,6 +269,41 @@ def get_expiration_status(exp_date, status_override):
         return "PLEASE INPUT LAST REG"
 
 
+def normalize_plate(plate):
+    """
+    Strips non-alphanumeric characters and converts to uppercase for comparisons.
+    Example: 'ABC-123' -> 'ABC123', 'XYZ 789' -> 'XYZ789'
+    """
+    if not plate or pd.isna(plate):
+        return ""
+    import re
+
+    return re.sub(r"[^A-Z0-9]", "", str(plate).upper())
+
+
+def log_activity(message):
+    """
+    Logs activity both to the console, GUI queue, and persistent file.
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    formatted_msg = f"[{timestamp}] {message}"
+    print(formatted_msg)
+
+    # Persist to file
+    try:
+        with open("system_activity.log", "a", encoding="utf-8") as f:
+            f.write(formatted_msg + "\n")
+    except:
+        pass
+
+    # Send to GUI
+    try:
+        gui_queue.put({"type": "log", "message": message, "status": ""})
+    except:
+        pass
+
+
+
 def clean_currency(val):
     import re
 
@@ -722,11 +757,12 @@ class AlertWindow(QMainWindow):
                     was_minimized = self.isMinimized()
                     self.build_ui(msg["alerts"], msg["title"])
 
-                    if not was_visible or was_minimized:
+                    should_popup = msg.get("popup", True)
+                    if (not was_visible or was_minimized) and should_popup:
                         if not was_visible:
                             # Popup size (not full screen)
-                            self.resize(500, 700)
-                            # Position in bottom-right corner of screen (near system tray)
+                            self.resize(1100, 700) # Slightly wider for table view
+                            # Position in bottom-right corner
                             screen = QApplication.primaryScreen()
                             sr = screen.availableGeometry()
                             w, h = self.width(), self.height()
@@ -734,7 +770,12 @@ class AlertWindow(QMainWindow):
                             y = max(sr.top(), sr.bottom() - h - 20)
                             self.setGeometry(x, y, w, h)
                             self.showNormal()
-                            self.stacked_widget.setCurrentIndex(0)
+                            
+                            # MASTER SMART: Show alerts table directly if auto-triggered
+                            if msg.get("is_auto", False):
+                                self.show_table_view(filter_status="ONLY_ALERTS")
+                            else:
+                                self.stacked_widget.setCurrentIndex(0)
                         elif was_minimized:
                             self.showNormal()
                         
@@ -796,25 +837,43 @@ class AlertWindow(QMainWindow):
         # 3. Setup Animations
         offset = self.width() if is_forward else -self.width()
         
-        # Old screen slides OUT
+        # Old screen slides OUT and fades OUT
         self.anim_old = QPropertyAnimation(self.animation_overlay, b"pos")
-        self.anim_old.setDuration(450)
+        self.anim_old.setDuration(500)
         self.anim_old.setStartValue(self.animation_overlay.pos())
-        self.anim_old.setEndValue(QPoint(self.animation_overlay.x() - offset, self.animation_overlay.y()))
+        self.anim_old.setEndValue(QPoint(self.animation_overlay.x() - offset // 2, self.animation_overlay.y()))
         self.anim_old.setEasingCurve(QEasingCurve.Type.OutCubic)
         
-        # New screen slides IN
+        self.opacity_old = QGraphicsOpacityEffect(self.animation_overlay)
+        self.animation_overlay.setGraphicsEffect(self.opacity_old)
+        self.anim_fade_old = QPropertyAnimation(self.opacity_old, b"opacity")
+        self.anim_fade_old.setDuration(400)
+        self.anim_fade_old.setStartValue(1.0)
+        self.anim_fade_old.setEndValue(0.0)
+        
+        # New screen slides IN and fades IN
         self.anim_new = QPropertyAnimation(next_widget, b"pos")
-        self.anim_new.setDuration(450)
-        self.anim_new.setStartValue(QPoint(offset, 0))
+        self.anim_new.setDuration(500)
+        self.anim_new.setStartValue(QPoint(offset // 2, 0))
         self.anim_new.setEndValue(QPoint(0, 0))
         self.anim_new.setEasingCurve(QEasingCurve.Type.OutCubic)
         
+        self.opacity_new = QGraphicsOpacityEffect(next_widget)
+        next_widget.setGraphicsEffect(self.opacity_new)
+        self.anim_fade_new = QPropertyAnimation(self.opacity_new, b"opacity")
+        self.anim_fade_new.setDuration(500)
+        self.anim_fade_new.setStartValue(0.0)
+        self.anim_fade_new.setEndValue(1.0)
+        
         # Cleanup after animation
+        self.anim_new.finished.connect(lambda: next_widget.setGraphicsEffect(None))
         self.anim_old.finished.connect(self.animation_overlay.deleteLater)
         
         self.anim_old.start()
+        self.anim_fade_old.start()
         self.anim_new.start()
+        self.anim_fade_new.start()
+
 
     def change_theme(self, selection):
         self.current_theme = selection
@@ -1213,7 +1272,11 @@ class AlertWindow(QMainWindow):
         ]
 
         for status_key in importance_order:
-            if (
+            # MASTER SMART: "ONLY_ALERTS" filter logic
+            if filter_status == "ONLY_ALERTS":
+                if status_key in ["SUFFICIENT TIME", "REGISTERED"]:
+                    continue
+            elif (
                 filter_status
                 and filter_status not in status_key
                 and status_key not in filter_status
@@ -1455,12 +1518,12 @@ class AlertWindow(QMainWindow):
 
 
 def send_notification(
-    detailed_alerts, title="⚠ Vehicle Update Detected", is_auto=False
+    detailed_alerts, title="⚠ Vehicle Update Detected", is_auto=False, popup=True
 ):
     if not detailed_alerts:
         return
     gui_queue.put(
-        {"type": "show", "alerts": detailed_alerts, "title": title, "is_auto": is_auto}
+        {"type": "show", "alerts": detailed_alerts, "title": title, "is_auto": is_auto, "popup": popup}
     )
 
     # Native Desktop Toast Alert for Auto/Background Changes
@@ -1799,7 +1862,10 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                     break
                 continue
 
-            plate = str(plate).strip()
+            orig_plate = str(plate).strip()
+            # Normalize for reliable comparison and tracking
+            plate = normalize_plate(orig_plate) 
+
             if sheet_name == "NEW UNIT":
                 # Use Acquisition Date + 3 years for countdown
                 try:
@@ -1872,7 +1938,9 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                 val_driver,
                 str(row[status_col]).strip() if status_col and pd.notna(row[status_col]) else "",
                 val_target_month,
+                orig_plate, # Store original for display
             )
+
 
             if not first_run or manual_sheet_target is not None:
                 old_state = previous_state.get(plate, None)
@@ -1921,9 +1989,23 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
 
     combined_current_state = {}
     combined_changed_records = []
-
-    for c_state, c_records, s_name in all_data:
-        combined_current_state.update(c_state)
+    
+    # MASTER POLISH: De-duplication
+    # We process Monthly Sheets normally, but ensure plates don't double up across sheets.
+    # If a plate exists in a Monthly sheet, it takes priority over NEW UNIT.
+    
+    # Process Monthly sheets first, then NEW UNIT
+    monthly_data = [d for d in all_data if d[2] != "NEW UNIT"]
+    new_unit_data = [d for d in all_data if d[2] == "NEW UNIT"]
+    
+    for c_state, c_records, s_name in monthly_data + new_unit_data:
+        for plate, state in c_state.items():
+            if plate not in combined_current_state:
+                combined_current_state[plate] = state
+            elif s_name != "NEW UNIT" and combined_current_state[plate][2] == "NEW UNIT":
+                # Override NEW UNIT data if a Monthly record exists (already transferred)
+                combined_current_state[plate] = state
+        
         combined_changed_records.extend(c_records)
 
     if first_run and manual_sheet_target is None:
@@ -1950,12 +2032,14 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
             acq_date = state_tuple[13] if len(state_tuple) > 13 else ""
             phys_status = state_tuple[14] if len(state_tuple) > 14 else ""
             driver = state_tuple[15] if len(state_tuple) > 15 else ""
-            print_status(f"[{plate}] {status}", status)
+            display_plate = state_tuple[18] if len(state_tuple) > 18 else plate
+            
+            print_status(f"[{display_plate}] {status}", status)
             if status not in initial_alerts:
                 initial_alerts[status] = []
             initial_alerts[status].append(
                 format_plate_with_data(
-                    plate,
+                    display_plate,
                     exp_date,
                     sheet_name,
                     owner,
@@ -1974,6 +2058,7 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                     driver,
                 )
             )
+
 
         print(f"{Fore.CYAN}--- End Initial Scan ---{Style.RESET_ALL}")
 
@@ -2017,11 +2102,13 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                 acq_date = state_tuple[13] if len(state_tuple) > 13 else ""
                 phys_status = state_tuple[14] if len(state_tuple) > 14 else ""
                 driver = state_tuple[15] if len(state_tuple) > 15 else ""
+                display_plate = state_tuple[18] if len(state_tuple) > 18 else plate
+                
                 if status not in manual_alerts:
                     manual_alerts[status] = []
                 manual_alerts[status].append(
                     format_plate_with_data(
-                        plate,
+                        display_plate,
                         exp_date,
                         sheet_name,
                         owner,
@@ -2042,6 +2129,7 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                         state_tuple[17] if len(state_tuple) > 17 else ""
                     )
                 )
+
 
             if manual_alerts:
                 send_notification(manual_alerts, title=title_text, is_auto=False)
@@ -2096,11 +2184,13 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                 acq_date = state_tuple[13] if len(state_tuple) > 13 else ""
                 phys_status = state_tuple[14] if len(state_tuple) > 14 else ""
                 driver = state_tuple[15] if len(state_tuple) > 15 else ""
+                display_plate = state_tuple[18] if len(state_tuple) > 18 else plate
+                
                 if status not in full_alerts:
                     full_alerts[status] = []
                 full_alerts[status].append(
                     format_plate_with_data(
-                        plate,
+                        display_plate,
                         exp_date,
                         sheet_name,
                         owner,
@@ -2122,18 +2212,27 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
                     )
                 )
 
-            if full_alerts:
-                send_notification(
-                    full_alerts,
-                    title=f"⚠ Real-time File Update: {sheet_title_str}",
-                    is_auto=True,
-                )
-            else:
-                send_notification(
-                    {"SUFFICIENT TIME": ["All Vehicles clear in latest update!"]},
-                    title=f"⚠ Real-time File Update: {sheet_title_str}",
-                    is_auto=True,
-                )
+
+            # --- MASTER SMART: Split Data Update from Popup Trigger ---
+            alerts_to_popup = {}
+            for rec in combined_changed_records:
+                new_stat = rec["new_status"]
+                # Determine if this change warrants a POPUP (Alert status change)
+                if new_stat not in ["REGISTERED", "30 DAYS AND MORE = SUFFICIENT TIME"]:
+                    if rec["old_status"] != new_stat:
+                        if new_stat not in alerts_to_popup:
+                            alerts_to_popup[new_stat] = []
+                        alerts_to_popup[new_stat].append(
+                            f"[{rec['plate']}] {rec.get('old_status','NEW')} -> {new_stat} ({rec['sheet']})"
+                        )
+
+            # ALWAYS update the dashboard UI, but only POPUP if there's a new alert
+            send_notification(
+                full_alerts, # Always send latest full data
+                title=f"⚠ Real-time File Update: {sheet_title_str}",
+                is_auto=True,
+                popup=(len(alerts_to_popup) > 0) # Only trigger window/sound if new alert
+            )
 
     if manual_sheet_target is None:
         previous_state = combined_current_state
@@ -2188,6 +2287,32 @@ def handle_new_unit_expiry(filepath):
         rows_to_delete = []
 
         for r in range(6, last_row + 1):
+            # --- MASTER SMART: Auto-Format/Tidy Up Row ---
+            cell_plate = ws_new.Cells(r, 3)
+            plate_val = str(cell_plate.Value).strip() if cell_plate.Value else ""
+            if plate_val and plate_val.upper() != "CRITERIA" and ws_new.Rows(r).RowHeight != 20:
+                try:
+                    row_rng = ws_new.Range(f"A{r}:P{r}")
+                    row_rng.WrapText = False
+                    row_rng.RowHeight = 20
+                    row_rng.VerticalAlignment = -4108 # xlCenter
+                    row_rng.HorizontalAlignment = -4108 # xlCenter
+                    # Standard Borders
+                    for i in [7,8,9,10,11,12]:
+                        row_rng.Borders(i).LineStyle = 1
+                        row_rng.Borders(i).Weight = 2
+                except:
+                    pass
+
+            # --- MASTER SMART: Auto-Date Helper ---
+            cell_status = ws_new.Cells(r, 1)
+            status_val_raw = str(cell_status.Value).strip().upper() if cell_status.Value else ""
+            if status_val_raw == "YES":
+                cell_last_reg = ws_new.Cells(r, 9)
+                if not cell_last_reg.Value:
+                    cell_last_reg.Value = today.strftime("%Y-%m-%d")
+                    gui_queue.put({"type": "log", "message": f"AUTO DATE: Set Last Reg for {plate_val}"})
+
             date_val = ws_new.Cells(r, 16).Value
             if not date_val:
                 continue
@@ -2228,20 +2353,37 @@ def handle_new_unit_expiry(filepath):
                     ws_new.Rows("4:5").Copy(Destination=ws_target.Rows("4:5"))
 
                 # Find next empty row in target (based on Plate # in Column C)
-                target_last_row = ws_target.Cells(ws_target.Rows.Count, "C").End(
-                    -4162
-                ).Row  # xlUp
+                target_last_row = ws_target.Cells(ws_target.Rows.Count, "C").End(-4162).Row  # xlUp
                 if target_last_row < 5:
                     target_last_row = 5
-                new_row_idx = target_last_row + 1
+                
+                # SMART DUPLICATE CHECK
+                plate_val = str(ws_new.Cells(r, 3).Value).strip() if ws_new.Cells(r, 3).Value else ""
+                is_duplicate = False
+                if plate_val:
+                    # Check first 100 rows of target sheet (safety)
+                    search_range = ws_target.Range(f"C6:C{max(100, target_last_row + 1)}")
+                    found_cell = search_range.Find(What=plate_val)
+                    if found_cell:
+                        is_duplicate = True
+                        print(f"Skipping transfer for {plate_val} - Already exists in {target_sheet_name}")
+                        gui_queue.put({"type": "log", "message": f"SKIP MOVE: {plate_val} already in {target_sheet_name}"})
 
-                # Copy row
-                ws_new.Rows(r).Copy(Destination=ws_target.Rows(new_row_idx))
+                if not is_duplicate:
+                    new_row_idx = target_last_row + 1
+                    # Copy row
+                    ws_new.Rows(r).Copy(Destination=ws_target.Rows(new_row_idx))
+                    gui_queue.put({"type": "log", "message": f"AUTO MOVE: {plate_val} -> {target_sheet_name}"})
+                    
+                    # Auto Sort target sheet by Plate # (Column C=3) if more than 1 data row
+                    if new_row_idx > 6:
+                        try:
+                            target_range = ws_target.Range(f"A6:P{new_row_idx}")
+                            target_range.Sort(Key1=ws_target.Range("C6"), Order1=1)  # xlAscending=1
+                        except:
+                            pass
+                
                 rows_to_delete.append(r)
-
-                # Auto Sort target sheet by Plate # (Column C=3)
-                target_range = ws_target.Range(f"A6:P{new_row_idx}")
-                target_range.Sort(Key1=ws_target.Range("C6"), Order1=1)  # xlAscending=1
             else:
                 # ITEM NOT EXPIRED: Update its status in Column K (ALERT)
                 # Map colors based on get_expiration_status
@@ -2263,6 +2405,11 @@ def handle_new_unit_expiry(filepath):
                     cell_alert.Font.Color = 0 # Black text for visibility
                     if status_str == "LESS THAN 0 DAYS = EXPIRED":
                         cell_alert.Font.Color = 16777215 # White text for red
+                
+                # MASTER POLISH: Auto-Cleanup ALERT text if Registered
+                if status_val_raw == "YES":
+                    cell_alert.Value = ""
+                    cell_alert.Interior.ColorIndex = 0 # No Fill
 
         # Delete rows in reverse to maintain indices
         for r in sorted(rows_to_delete, reverse=True):
@@ -2270,9 +2417,13 @@ def handle_new_unit_expiry(filepath):
 
         if rows_to_delete:
             wb.Save()
-            print(
-                f"Transferred {len(rows_to_delete)} units from NEW UNIT to monthly sheets."
-            )
+            print(f"Transferred {len(rows_to_delete)} units from NEW UNIT to monthly sheets.")
+            
+            # --- SMART POPUP: Transfer Notification ---
+            move_msg = { "3-YEAR ANNIVERSARY": [] }
+            # Re-collect names if needed, or just a summary
+            move_msg["3-YEAR ANNIVERSARY"].append(f"Successfully moved {len(rows_to_delete)} vehicles from NEW UNIT to their respective Monthly Sheets.")
+            send_notification(move_msg, title="⚠ Automated Vehicle Transfer", is_auto=True)
 
     except Exception as e:
         print(f"Error in handle_new_unit_expiry: {e}")
@@ -2280,7 +2431,98 @@ def handle_new_unit_expiry(filepath):
         pythoncom.CoUninitialize()
 
 
+def sync_excel_status_colors(filepath, combined_state):
+    """
+    MASTER SMART: Updates the ALERT column (K) and colors in all relevant monthly sheets
+    based on the latest calculated status.
+    """
+    import pythoncom
+    pythoncom.CoInitialize()
+    try:
+        try:
+            excel = win32com.client.GetActiveObject("Excel.Application")
+        except:
+            excel = win32com.client.Dispatch("Excel.Application")
+
+        abs_path = os.path.abspath(filepath)
+        wb = None
+        for w in excel.Workbooks:
+            if w.FullName.lower() == abs_path.lower():
+                wb = w
+                break
+        if not wb:
+            if os.path.exists(abs_path):
+                wb = excel.Workbooks.Open(abs_path)
+            else:
+                return
+
+        color_map = {
+            "LESS THAN 0 DAYS = EXPIRED": 255,                 # Red
+            "1 TO 14 DAYS = DAYS BEFORE EXPIRY": 49407,        # Orange
+            "15 TO 29 DAYS = DAYS BEFORE 2 WEEK NOTICE": 65535, # Yellow
+            "30 DAYS AND MORE = SUFFICIENT TIME": 5287936,     # Green
+            "PLEASE INPUT LAST REG": 12632256,                 # Gray
+            "REGISTERED": 16737843                             # Blue
+        }
+
+        # Group plates by sheet
+        sheet_groups = {}
+        for plate, state in combined_state.items():
+            sheet_name = state[2]
+            if sheet_name not in sheet_groups:
+                sheet_groups[sheet_name] = []
+            sheet_groups[sheet_name].append((state[18], state[0], state[16])) # (orig_plate, status, status_val)
+
+        for s_name, plates in sheet_groups.items():
+            try:
+                ws = wb.Sheets(s_name)
+            except:
+                continue
+            
+            # Find PLATE column (C=3) and ALERT column (K=11)
+            # Find data range
+            last_row = ws.Cells(ws.Rows.Count, "C").End(-4162).Row # xlUp
+            if last_row < 6: continue
+            
+            search_range = ws.Range(f"C6:C{last_row}")
+            
+            for orig_plate, status_str, status_val_raw in plates:
+                found_cell = search_range.Find(What=orig_plate)
+                if found_cell:
+                    r = found_cell.Row
+                    
+                    # --- MASTER SMART: Auto-Date Helper for Monthly Sheets ---
+                    if str(status_val_raw).strip().upper() == "YES":
+                        cell_last_reg = ws.Cells(r, 9) # Column I = 9
+                        if not cell_last_reg.Value:
+                            today_str = datetime.now().strftime("%Y-%m-%d")
+                            cell_last_reg.Value = today_str
+                            log_activity(f"AUTO DATE: Set Last Reg for {orig_plate} in {s_name}")
+
+                    cell_alert = ws.Cells(r, 11) # Column K
+
+                    
+                    # Update value and color if it changed
+                    if str(cell_alert.Value).strip() != status_str:
+                        cell_alert.Value = status_str
+                        
+                        # MASTER POLISH: Clear if Registered
+                        if str(status_val_raw).strip().upper() == "YES":
+                            cell_alert.Value = ""
+                            cell_alert.Interior.ColorIndex = 0
+                        elif status_str in color_map:
+                            cell_alert.Interior.Color = color_map[status_str]
+                            cell_alert.Font.Color = 0 if status_str != "LESS THAN 0 DAYS = EXPIRED" else 16777215
+        
+        # Don't auto-save here to avoid excessive disk I/O, let background_monitor handle it or user save
+    except Exception as e:
+        print(f"Error in sync_excel_status_colors: {e}")
+    finally:
+        pythoncom.CoUninitialize()
+
+
 def background_monitor():
+
     global monitor_active, tracked_mtimes
     last_checked_date = datetime.now().date()
 
@@ -2292,17 +2534,39 @@ def background_monitor():
                 last_checked_date = current_date
 
             if os.path.exists(EXCEL_FILE):
-                current_mtime = os.path.getmtime(EXCEL_FILE)
-                if tracked_mtimes.get(EXCEL_FILE) != current_mtime:
+                try:
+                    current_mtime = os.path.getmtime(EXCEL_FILE)
+                except OSError:
+                    # File might be locked by Excel saving, wait and retry
                     time.sleep(2)
+                    continue
+
+                if tracked_mtimes.get(EXCEL_FILE) != current_mtime:
+                    # MASTER POLISH: Wait for file to be released (up to 5 retries)
+                    for attempt in range(5):
+                        try:
+                            # Test if we can open the file
+                            with open(EXCEL_FILE, 'rb'):
+                                pass
+                            break
+                        except IOError:
+                            time.sleep(2)
+                    
                     handle_new_unit_expiry(EXCEL_FILE)
                     process_excel(EXCEL_FILE)
+                    
+                    # MASTER SMART: Sync Excel colors after processing
+                    global previous_state
+                    sync_excel_status_colors(EXCEL_FILE, previous_state)
+                    
                     try:
                         tracked_mtimes[EXCEL_FILE] = os.path.getmtime(EXCEL_FILE)
-                    except WindowsError:
+                    except (WindowsError, OSError):
                         pass
+
             time.sleep(CHECK_INTERVAL_SECONDS)
         except Exception as e:
+            print(f"Monitor error: {e}")
             time.sleep(CHECK_INTERVAL_SECONDS)
 
 
