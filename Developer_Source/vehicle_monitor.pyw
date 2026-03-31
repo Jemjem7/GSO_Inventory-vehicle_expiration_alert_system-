@@ -486,7 +486,7 @@ class AlertWindow(QMainWindow):
         self.new_unit_container_layout = QVBoxLayout(self.new_unit_container)
         self.new_unit_container_layout.setContentsMargins(40, 20, 40, 5)
         
-        self.btn_new_unit = QPushButton("✨ NEW UNIT (READY)")
+        self.btn_new_unit = QPushButton("✨ NEW UNIT ")
         self.btn_new_unit.setObjectName("NewUnitCard")
         self.btn_new_unit.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.btn_new_unit.setMinimumHeight(100) # Significantly larger than months

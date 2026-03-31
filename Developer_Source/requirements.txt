@@ -1,7 +1,11 @@
 pandas
 openpyxl
+PyQt6
+pystray
+pywin32
 colorama
 win10toast
 watchdog
 plyer
 Pillow
+pyinstaller
