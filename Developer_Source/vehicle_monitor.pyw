@@ -84,7 +84,33 @@ sys.stderr = SafeStream(sys.stderr)
 colorama.init(autoreset=True)
 
 # Configuration
-EXCEL_FILE = "../GSO_ALERT/VehicleMonitoring.xlsx"
+def get_excel_path():
+    """
+    Finds the Excel file starting from current directory, then parent, 
+    ensuring portability for both .py and .exe versions.
+    """
+    filename = "VehicleMonitoring.xlsx"
+    # 1. Check same directory as .exe / .pyw
+    if os.path.exists(filename):
+        return filename
+    
+    # 2. Check sibling GSO_ALERT (Developer Structure)
+    try:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        dev_path = os.path.join(base_dir, "..", "GSO_ALERT", filename)
+        if os.path.exists(dev_path):
+            return dev_path
+        # 3. Check within Developer_Source parent
+        parent_path = os.path.join(base_dir, "..", filename)
+        if os.path.exists(parent_path):
+            return parent_path
+    except:
+        pass
+        
+    path = filename # Fallback to literal
+    return path
+
+EXCEL_FILE = get_excel_path()
 CHECK_INTERVAL_SECONDS = 5
 
 
@@ -128,6 +154,7 @@ current_sheets = []
 monitor_active = True
 tray_icon = None
 current_viewed_sheet = None
+scan_lock = threading.Lock()  # Prevent overlapping Excel scans (stale popup risk)
 
 
 def sort_sheets_chronologically(sheet_list):
@@ -352,7 +379,7 @@ class AlertWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("⚠ Vehicle Expiration Alert Dashboard")
+        self.setWindowTitle("⚠ Vehicle Expiration Alert Dashboard (V3.0 FINAL)")
         self.last_alerts = {}
         self.last_title = ""
         self.first_popup_sound_played = False
@@ -365,7 +392,12 @@ class AlertWindow(QMainWindow):
             if hasattr(sys, "_MEIPASS"):
                 icon_path = os.path.join(sys._MEIPASS, "excel_scan_v3_final.ico")
             else:
+                # Portable icon search: same dir as script, then parent
                 icon_path = os.path.abspath("excel_scan_v3_final.ico")
+                if not os.path.exists(icon_path):
+                    script_dir = os.path.dirname(os.path.abspath(__file__))
+                    icon_path = os.path.join(script_dir, "excel_scan_v3_final.ico")
+
             if os.path.exists(icon_path):
                 self.setWindowIcon(QIcon(icon_path))
             import ctypes
@@ -448,14 +480,17 @@ class AlertWindow(QMainWindow):
         self.month_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.month_scroll.setStyleSheet("background: transparent; border: none;")
         
-        # New Unit Frame (Separated from scroll)
+        # NEW UNIT Dashboard Card (Not just another button)
         self.new_unit_container = QFrame()
         self.new_unit_container.setObjectName("NewUnitContainer")
         self.new_unit_container_layout = QVBoxLayout(self.new_unit_container)
-        self.new_unit_container_layout.setContentsMargins(50, 0, 50, 10)
-        self.btn_new_unit = MonthButton("NEW UNIT")
-        # Distinct style
-        self.btn_new_unit.setStyleSheet("background-color: #4A90E2; color: #FFFFFF; border: 2px solid #FFFFFF;")
+        self.new_unit_container_layout.setContentsMargins(40, 20, 40, 5)
+        
+        self.btn_new_unit = QPushButton("✨ NEW UNIT (READY)")
+        self.btn_new_unit.setObjectName("NewUnitCard")
+        self.btn_new_unit.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_new_unit.setMinimumHeight(100) # Significantly larger than months
+        
         self.new_unit_container_layout.addWidget(self.btn_new_unit)
         self.new_unit_container.hide() # Hidden until scan finds it
         
@@ -704,7 +739,7 @@ class AlertWindow(QMainWindow):
     def do_initial_startup(self):
         try:
             backup_excel(EXCEL_FILE)
-            process_excel(EXCEL_FILE)
+            process_excel_serial(EXCEL_FILE)
         except Exception as e:
             print(e)
         self.table_title_lbl.setText("DETAIL VIEW")
@@ -998,6 +1033,24 @@ class AlertWindow(QMainWindow):
                 background-color: {t_cfg['dash_bg']};
             }}
 
+            /* NEW UNIT CARD (Premium Styling) */
+            QPushButton#NewUnitCard {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1A1A1A, stop:1 #333333);
+                border: 2px solid #FFD700; /* Gold Border */
+                border-radius: 15px;
+                color: #FFD700; /* Gold Text */
+                font-size: 22px;
+                font-weight: 900;
+                font-style: italic;
+                padding: 15px;
+                margin-bottom: 10px;
+            }}
+            QPushButton#NewUnitCard:hover {{
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #FFD700, stop:1 #FFA500);
+                color: #000000;
+                border: 2px solid #FFFFFF;
+            }}
+
             QWidget#TablePage {{
                 background-color: {t_bg};
             }}
@@ -1183,18 +1236,32 @@ class AlertWindow(QMainWindow):
                 item.widget().deleteLater()
 
         global current_sheets
-        self.new_unit_container.hide()
+        # DEBUG LOG: Trace the exact list of sheets being checked
+        found_new_unit = False
+        new_unit_count = 0
+        
+        # Count New Units from detailed data
+        for status, plates in detailed_alerts.items():
+            if isinstance(plates, list):
+                for p_json in plates:
+                    try:
+                        import json
+                        p_data = json.loads(p_json)
+                        if p_data.get("sheet") == "NEW UNIT":
+                            new_unit_count += 1
+                    except: pass
+
         if current_sheets:
             sorted_sheets = sort_sheets_chronologically(current_sheets)
             for sh in sorted_sheets:
-                sh_name = str(sh).upper()
+                sh_name = str(sh).strip().upper()
                 if sh_name == "NEW UNIT":
+                    found_new_unit = True
                     self.new_unit_container.show()
                     try: self.btn_new_unit.clicked.disconnect()
                     except: pass
-                    self.btn_new_unit.clicked.connect(
-                        (lambda s=sh: lambda: self.show_table_view(filter_sheet=s))()
-                    )
+                    self.btn_new_unit.clicked.connect(self.do_scan_new_unit)
+                    self.btn_new_unit.setText(f"✨ {new_unit_count} NEW UNITS READY")
                     continue
                     
                 btn = MonthButton(sh_name)
@@ -1202,6 +1269,9 @@ class AlertWindow(QMainWindow):
                     (lambda s=sh: lambda: self.show_table_view(filter_sheet=s))()
                 )
                 self.month_list_layout.addWidget(btn)
+        if not found_new_unit:
+            self.new_unit_container.hide()
+            
         self.month_list_layout.addStretch()
 
         # Update table using current filters to preserve view
@@ -1420,7 +1490,7 @@ class AlertWindow(QMainWindow):
         
         def run_scan():
             try:
-                process_excel(EXCEL_FILE, None, True)
+                process_excel_serial(EXCEL_FILE, None, True)
             finally:
                 # Reset button in main thread
                 QTimer.singleShot(0, lambda: self.scan_all_btn.setText("SCAN\nALL"))
@@ -1437,8 +1507,36 @@ class AlertWindow(QMainWindow):
         previous_state.clear()
         
         threading.Thread(
-            target=process_excel, args=(EXCEL_FILE, selection, True), daemon=True
+            target=process_excel_serial, args=(EXCEL_FILE, selection, True), daemon=True
         ).start()
+
+    def do_scan_new_unit(self):
+        """
+        Dedicated NEW UNIT scan from the dashboard card.
+        Scans ONLY the NEW UNIT sheet (serialized), then opens table filtered to NEW UNIT.
+        """
+        selection = "NEW UNIT"
+        global current_viewed_sheet
+        current_viewed_sheet = selection
+
+        self.table_title_lbl.setText("Scanning NEW UNIT in background...")
+        self.btn_new_unit.setText("✨ SCANNING NEW UNIT...")
+        self.btn_new_unit.setEnabled(False)
+
+        global previous_state
+        previous_state.clear()
+
+        def run_scan():
+            try:
+                process_excel_serial(EXCEL_FILE, selection, True)
+            finally:
+                def finish():
+                    # Table view focused to NEW UNIT with freshly scanned data
+                    self.show_table_view(filter_sheet=selection)
+                    self.btn_new_unit.setEnabled(True)
+                QTimer.singleShot(0, finish)
+
+        threading.Thread(target=run_scan, daemon=True).start()
 
     def open_excel_at_sheet(self, sheet_to_open):
         current_time = time.time()
@@ -1540,8 +1638,6 @@ def send_notification(
                 if not os.path.exists(icon_p):
                     icon_p = None # Fallback to default python or windows icon
 
-                from win10toast import ToastNotifier
-                toaster = ToastNotifier()
                 total_count = sum(len(v) for v in detailed_alerts.values() if isinstance(v, list))
                 
                 # Check for critical counts (EXPIRED)
@@ -1550,15 +1646,35 @@ def send_notification(
                 if expired_count > 0:
                     msg = f"CRITICAL: {expired_count} fully EXPIRED vehicles found!"
 
-                toaster.show_toast(
-                    title, 
-                    msg, 
-                    icon_path=icon_p, 
-                    duration=6, 
-                    threaded=False # inside threading.Thread already
-                )
             except:
                 pass
+            else:
+                # Prefer native win10toast; fall back to plyer if win10toast is unusable
+                toast_ok = False
+                try:
+                    from win10toast import ToastNotifier
+                    toaster = ToastNotifier()
+                    toaster.show_toast(
+                        title,
+                        msg,
+                        icon_path=icon_p,
+                        duration=6,
+                        threaded=False,  # inside threading.Thread already
+                    )
+                    toast_ok = True
+                except:
+                    toast_ok = False
+
+                if not toast_ok:
+                    try:
+                        from plyer import notification
+                        notification.notify(
+                            title=title,
+                            message=msg,
+                            app_name="Vehicle Alert",
+                        )
+                    except:
+                        pass
         threading.Thread(target=show_toast_threaded, daemon=True).start()
 
 
@@ -2241,6 +2357,15 @@ def process_excel(filepath, manual_sheet_target=None, is_manual_scan=False):
     return True
 
 
+def process_excel_serial(filepath, manual_sheet_target=None, is_manual_scan=False):
+    """
+    Serialize all Excel scans to avoid overlapping reads/writes that can cause
+    stale/inaccurate UI popups.
+    """
+    with scan_lock:
+        return process_excel(filepath, manual_sheet_target, is_manual_scan)
+
+
 tracked_mtimes = {}
 
 
@@ -2419,11 +2544,11 @@ def handle_new_unit_expiry(filepath):
             wb.Save()
             print(f"Transferred {len(rows_to_delete)} units from NEW UNIT to monthly sheets.")
             
-            # --- SMART POPUP: Transfer Notification ---
-            move_msg = { "3-YEAR ANNIVERSARY": [] }
-            # Re-collect names if needed, or just a summary
-            move_msg["3-YEAR ANNIVERSARY"].append(f"Successfully moved {len(rows_to_delete)} vehicles from NEW UNIT to their respective Monthly Sheets.")
-            send_notification(move_msg, title="⚠ Automated Vehicle Transfer", is_auto=True)
+            # Avoid triggering an alerts popup with a dummy/empty category.
+            # The subsequent `process_excel_serial(EXCEL_FILE)` will generate accurate alerts.
+            gui_queue.put(
+                {"type": "log", "message": f"AUTO MOVE: {len(rows_to_delete)} vehicles transferred from NEW UNIT."}
+            )
 
     except Exception as e:
         print(f"Error in handle_new_unit_expiry: {e}")
@@ -2553,7 +2678,7 @@ def background_monitor():
                             time.sleep(2)
                     
                     handle_new_unit_expiry(EXCEL_FILE)
-                    process_excel(EXCEL_FILE)
+                    process_excel_serial(EXCEL_FILE)
                     
                     # MASTER SMART: Sync Excel colors after processing
                     global previous_state
@@ -2576,7 +2701,7 @@ def on_scan_all(icon, item):
     current_viewed_sheet = None
     print("Manually Scanning Excel...")
     threading.Thread(
-        target=process_excel,
+        target=process_excel_serial,
         args=(EXCEL_FILE,),
         kwargs={"is_manual_scan": True},
         daemon=True,
@@ -2589,7 +2714,7 @@ def make_scan_sheet_callback(sheet_name):
         current_viewed_sheet = sheet_name
         print(f"Manually Scanning: {sheet_name}")
         threading.Thread(
-            target=process_excel,
+            target=process_excel_serial,
             args=(EXCEL_FILE,),
             kwargs={"manual_sheet_target": sheet_name, "is_manual_scan": True},
             daemon=True,
@@ -2672,7 +2797,7 @@ def main():
                         # Request UI to show window
                         gui_queue.put({"type": "show_request"})
                         threading.Thread(
-                            target=process_excel,
+                            target=process_excel_serial,
                             args=(EXCEL_FILE,),
                             kwargs={"is_manual_scan": True},
                             daemon=True,
